@@ -12,10 +12,10 @@ void main() {
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-      statusBarBrightness: Brightness.dark,
+      statusBarIconBrightness: Brightness.dark, // Ikon Gelap/Hitam
+      statusBarBrightness: Brightness.light,    // Background terang (overlay putih) -> teks hitam
       systemNavigationBarColor: Colors.transparent,
-      systemNavigationBarIconBrightness: Brightness.light,
+      systemNavigationBarIconBrightness: Brightness.dark,
       systemNavigationBarContrastEnforced: false,
       systemStatusBarContrastEnforced: false,
     ),
@@ -432,10 +432,10 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.light, // Ikon Jam & Baterai PUTIH TERANG
-        statusBarBrightness: Brightness.dark,      // Background gelap -> teks putih
+        statusBarIconBrightness: Brightness.dark, // Ikon Jam & Baterai GELAP/HITAM
+        statusBarBrightness: Brightness.light,    // Background terang (overlay putih) -> teks hitam
         systemNavigationBarColor: Colors.transparent,
-        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarIconBrightness: Brightness.dark,
         systemStatusBarContrastEnforced: false,
         systemNavigationBarContrastEnforced: false,
       ),
