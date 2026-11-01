@@ -1,0 +1,57 @@
+name: Build Flutter APK (arm64)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Flutter arm64 APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Generate Flutter Template if Empty
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "Repository kosong dari Flutter, membuat template Flutter default dari 0..."
+            flutter create --org com.afifsuda --project-name app .
+          fi
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Build APK (Khusus arm64)
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Upload APK ke GitHub Releases (Tanpa GitHub Storage)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          TAG="v1.0.${{ github.run_number }}"
+          
+          echo "Ukuran file APK: $(ls -lh $APK_PATH | awk '{print $5}')"
+          
+          # Upload langsung ke GitHub Releases menggunakan GitHub CLI
+          gh release create "$TAG" "$APK_PATH" \
+            --title "Flutter arm64 APK - Build #${{ github.run_number }}" \
+            --notes "Hasil build Flutter default template (arm64). Dibuat otomatis tanpa memakai kuota GitHub Actions Artifact Storage."
