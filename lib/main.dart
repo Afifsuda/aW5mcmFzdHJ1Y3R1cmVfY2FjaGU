@@ -462,6 +462,30 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
             ),
           ),
 
+          // Overlay Putih Halus Gradient di Topbar (UX Standard)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: MediaQuery.of(context).padding.top + 28,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.white.withOpacity(0.35),
+                      Colors.white.withOpacity(0.12),
+                      Colors.white.withOpacity(0.0),
+                    ],
+                    stops: const [0.0, 0.6, 1.0],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
           // Bottom Bar (1:1 dengan CSS/HTML)
           Positioned(
             left: 20,
