@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -28,6 +30,7 @@ jobs:
         with:
           channel: 'stable'
           cache: true
+          cache-key: "flutter-:os:-:channel:-:version:"
 
       - name: Generate Android Platform Files if needed
         run: |
@@ -37,9 +40,27 @@ jobs:
             flutter create --org com.afifsuda --project-name app .
             rm -rf lib
             cp -r /tmp/lib_bak lib
+            
             # Tambahkan izin INTERNET untuk download satellite map tiles
             sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
+            
+            # Optimasi Gradle
+            echo "org.gradle.caching=true" >> android/gradle.properties
+            echo "org.gradle.parallel=true" >> android/gradle.properties
+            echo "org.gradle.jvmargs=-Xmx3072m -XX:+UseParallelGC" >> android/gradle.properties
+            
+            # Simpan file android ke git agar build berikutnya tidak perlu create ulang
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add android .gitignore 2>/dev/null || true
+            git commit -m "chore: persist android project files and optimizations [skip ci]" || true
+            git push origin main || true
           fi
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
 
       - name: Get Dependencies
         run: flutter pub get
@@ -59,4 +80,4 @@ jobs:
           # Upload langsung ke GitHub Releases menggunakan GitHub CLI
           gh release create "$TAG" "$APK_PATH" \
             --title "Satellite Map Canvas arm64 - Build #${{ github.run_number }}" \
-            --notes "Porting 1:1 untitled.html ke Flutter (Canvas CustomPainter, tanpa Webview, tanpa library tambahan). Khusus arm64."
+            --notes "Optimized build with Gradle caching & parallel compilation. Khusus arm64."
