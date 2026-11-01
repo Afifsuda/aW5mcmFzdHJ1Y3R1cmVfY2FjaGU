@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -71,13 +72,19 @@ class Mercator {
   }
 }
 
-// 3. Tile Loader (Esri World Imagery - Tanpa API Key)
+enum MapMode {
+  hybrid,    // Satelit + Nama Jalan & Alamat
+  streets,   // Peta Jalan Lengkap (CartoDB)
+  satellite, // Satelit Murni
+}
+
+// 3. Tile Loader (Mendukung Satelit + Layer Label & Jalan)
 class TileManager extends ChangeNotifier {
   final Map<String, ui.Image?> _cache = {};
   final HttpClient _httpClient = HttpClient();
 
-  ui.Image? getTile(int x, int y, int z) {
-    final key = '$z/$y/$x';
+  ui.Image? getTile(int x, int y, int z, {required String type}) {
+    final key = '$type/$z/$y/$x';
     if (_cache.containsKey(key)) {
       return _cache[key];
     }
@@ -87,16 +94,31 @@ class TileManager extends ChangeNotifier {
     if (y < 0 || y >= max) return null;
 
     _cache[key] = null; // Tandai sedang memuat
-    _loadTile(wrappedX, y, z, key);
+    _loadTile(wrappedX, y, z, key, type);
     return null;
   }
 
-  Future<void> _loadTile(int x, int y, int z, String key) async {
+  Future<void> _loadTile(int x, int y, int z, String key, String type) async {
     try {
-      final url = Uri.parse(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x',
-      );
+      Uri url;
+      if (type == 'satellite') {
+        url = Uri.parse(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x',
+        );
+      } else if (type == 'labels') {
+        // Transparent PNG label & nama jalan (CartoDB Labels)
+        url = Uri.parse(
+          'https://basemaps.cartocdn.com/rastertiles/voyager_only_labels/$z/$x/$y.png',
+        );
+      } else {
+        // Peta jalan lengkap
+        url = Uri.parse(
+          'https://basemaps.cartocdn.com/rastertiles/voyager/$z/$x/$y.png',
+        );
+      }
+
       final request = await _httpClient.getUrl(url);
+      request.headers.set('User-Agent', 'SatelliteMapFlutter/1.0');
       final response = await request.close();
       if (response.statusCode == 200) {
         final bytes = await consolidateHttpClientResponseBytes(response);
@@ -106,7 +128,7 @@ class TileManager extends ChangeNotifier {
         notifyListeners();
       }
     } catch (_) {
-      // Abaikan jika ada kegagalan jaringan individual
+      // Abaikan kegagalan jaringan sementara
     }
   }
 
@@ -117,16 +139,18 @@ class TileManager extends ChangeNotifier {
   }
 }
 
-// 4. CustomPainter (1:1 Flutter CustomPainter)
+// 4. CustomPainter (1:1 Flutter CustomPainter dengan Layer Label)
 class SatelliteMapPainter extends CustomPainter {
   final TileManager tileManager;
   final LatLng centerLatLng;
   final int zoom;
+  final MapMode mapMode;
 
   SatelliteMapPainter({
     required this.tileManager,
     required this.centerLatLng,
     required this.zoom,
+    required this.mapMode,
   }) : super(repaint: tileManager);
 
   @override
@@ -143,25 +167,53 @@ class SatelliteMapPainter extends CustomPainter {
     final minTileY = (startY / tileSize).floor().clamp(0, maxIndex);
     final maxTileY = ((startY + size.height) / tileSize).floor().clamp(0, maxIndex);
 
-    // Background hitam
+    // Background hitam untuk satelit, abu-abu muda untuk peta jalan
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint()..color = const Color(0xFF000000),
+      Paint()..color = mapMode == MapMode.streets ? const Color(0xFFF5F5F7) : const Color(0xFF000000),
     );
 
     for (int tx = minTileX; tx <= maxTileX; tx++) {
       for (int ty = minTileY; ty <= maxTileY; ty++) {
-        final tileImg = tileManager.getTile(tx, ty, zoom);
         final posX = (tx * tileSize - startX).roundToDouble();
         final posY = (ty * tileSize - startY).roundToDouble();
+        final dstRect = Rect.fromLTWH(posX, posY, tileSize, tileSize);
 
-        if (tileImg != null) {
-          canvas.drawImageRect(
-            tileImg,
-            Rect.fromLTWH(0, 0, tileImg.width.toDouble(), tileImg.height.toDouble()),
-            Rect.fromLTWH(posX, posY, tileSize, tileSize),
-            Paint(),
-          );
+        // 1. Gambar Base Map
+        if (mapMode == MapMode.streets) {
+          final streetTile = tileManager.getTile(tx, ty, zoom, type: 'streets');
+          if (streetTile != null) {
+            canvas.drawImageRect(
+              streetTile,
+              Rect.fromLTWH(0, 0, streetTile.width.toDouble(), streetTile.height.toDouble()),
+              dstRect,
+              Paint(),
+            );
+          }
+        } else {
+          // Satelit (Hybrid atau Murni)
+          final satTile = tileManager.getTile(tx, ty, zoom, type: 'satellite');
+          if (satTile != null) {
+            canvas.drawImageRect(
+              satTile,
+              Rect.fromLTWH(0, 0, satTile.width.toDouble(), satTile.height.toDouble()),
+              dstRect,
+              Paint(),
+            );
+          }
+        }
+
+        // 2. Gambar Layer Label / Nama Jalan di atas Satelit (Khusus Mode Hybrid)
+        if (mapMode == MapMode.hybrid) {
+          final labelTile = tileManager.getTile(tx, ty, zoom, type: 'labels');
+          if (labelTile != null) {
+            canvas.drawImageRect(
+              labelTile,
+              Rect.fromLTWH(0, 0, labelTile.width.toDouble(), labelTile.height.toDouble()),
+              dstRect,
+              Paint(),
+            );
+          }
         }
       }
     }
@@ -169,7 +221,9 @@ class SatelliteMapPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant SatelliteMapPainter oldDelegate) {
-    return oldDelegate.centerLatLng != centerLatLng || oldDelegate.zoom != zoom;
+    return oldDelegate.centerLatLng != centerLatLng ||
+        oldDelegate.zoom != zoom ||
+        oldDelegate.mapMode != mapMode;
   }
 }
 
@@ -183,12 +237,14 @@ class SatelliteMapScreen extends StatefulWidget {
 
 class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
   late final TileManager _tileManager;
-  LatLng _center = const LatLng(-6.1754, 106.8272);
+  LatLng _center = const LatLng(-6.1754, 106.8272); // Monas Jakarta
   int _zoom = 15;
   static const int _minZoom = 3;
   static const int _maxZoom = 18;
 
+  MapMode _mapMode = MapMode.hybrid; // Default: Satelit + Label Nama Jalan!
   bool _isActionActive = false;
+  bool _isSearching = false;
   final TextEditingController _searchController = TextEditingController();
 
   double _baseScale = 1.0;
@@ -271,6 +327,78 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
     _baseScale = 1.0;
   }
 
+  // Geocoding Pencarian Lokasi
+  Future<void> _searchLocation(String query) async {
+    if (query.trim().isEmpty) return;
+    setState(() => _isSearching = true);
+    FocusScope.of(context).unfocus();
+
+    try {
+      final client = HttpClient();
+      final url = Uri.parse(
+        'https://nominatim.openstreetmap.org/search?q=${Uri.encodeComponent(query)}&format=json&limit=1',
+      );
+      final request = await client.getUrl(url);
+      request.headers.set('User-Agent', 'SatelliteMapFlutter/1.0');
+      final response = await request.close();
+      if (response.statusCode == 200) {
+        final body = await response.transform(utf8.decoder).join();
+        final List list = jsonDecode(body);
+        if (list.isNotEmpty && mounted) {
+          final item = list.first;
+          final lat = double.parse(item['lat']);
+          final lon = double.parse(item['lon']);
+          final displayName = item['display_name'];
+
+          setState(() {
+            _center = LatLng(lat, lon);
+            _zoom = 15;
+          });
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Lokasi ditemukan: $displayName', maxLines: 2),
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+      client.close();
+    } catch (_) {
+      // Abaikan error pencarian
+    } finally {
+      if (mounted) setState(() => _isSearching = false);
+    }
+  }
+
+  void _toggleMapMode() {
+    setState(() {
+      if (_mapMode == MapMode.hybrid) {
+        _mapMode = MapMode.streets;
+      } else if (_mapMode == MapMode.streets) {
+        _mapMode = MapMode.satellite;
+      } else {
+        _mapMode = MapMode.hybrid;
+      }
+    });
+
+    final modeNames = {
+      MapMode.hybrid: 'Satelit + Label Jalan (Hybrid)',
+      MapMode.streets: 'Peta Jalan Bersih (Street)',
+      MapMode.satellite: 'Satelit Polos (Tanpa Label)',
+    };
+
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Mode: ${modeNames[_mapMode]}'),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.of(context).size;
@@ -279,7 +407,7 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Canvas Peta Satelit
+          // Canvas Peta Satelit + Label
           Positioned.fill(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -291,6 +419,7 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
                   tileManager: _tileManager,
                   centerLatLng: _center,
                   zoom: _zoom,
+                  mapMode: _mapMode,
                 ),
                 size: Size.infinite,
               ),
@@ -312,7 +441,7 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
                     });
                   },
                   child: AnimatedRotation(
-                    turns: _isActionActive ? 0.125 : 0.0, // 45 derajat (1/8 turn)
+                    turns: _isActionActive ? 0.125 : 0.0,
                     duration: const Duration(milliseconds: 250),
                     curve: const Cubic(0.4, 0, 0.2, 1),
                     child: CustomPaint(
@@ -323,15 +452,9 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
                 ),
                 const SizedBox(width: 12),
 
-                // Tombol Maps
+                // Tombol Maps (Ganti Mode: Satelit + Label / Peta Jalan)
                 _buildCircleButton(
-                  onTap: () {
-                    // Reset ke posisi awal Monas Jakarta
-                    setState(() {
-                      _center = const LatLng(-6.1754, 106.8272);
-                      _zoom = 15;
-                    });
-                  },
+                  onTap: _toggleMapMode,
                   child: CustomPaint(
                     size: const Size(18, 18),
                     painter: _PinIconPainter(color: const Color(0xFF1A1A1A)),
@@ -350,10 +473,16 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Row(
                       children: [
-                        CustomPaint(
-                          size: const Size(18, 18),
-                          painter: _SearchIconPainter(color: const Color(0xFF6B7280)),
-                        ),
+                        _isSearching
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : CustomPaint(
+                                size: const Size(18, 18),
+                                painter: _SearchIconPainter(color: const Color(0xFF6B7280)),
+                              ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: TextField(
@@ -363,14 +492,12 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
                               fontSize: 14,
                             ),
                             textInputAction: TextInputAction.search,
-                            onSubmitted: (query) {
-                              FocusScope.of(context).unfocus();
-                            },
+                            onSubmitted: _searchLocation,
                             decoration: const InputDecoration(
-                              hintText: 'Cari lokasi...',
+                              hintText: 'Cari lokasi (cth: Monas, Bandung)...',
                               hintStyle: TextStyle(
                                 color: Color(0xFF9CA3AF),
-                                fontSize: 14,
+                                fontSize: 13,
                               ),
                               border: InputBorder.none,
                               isDense: true,
@@ -412,7 +539,7 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
   }
 }
 
-// 1:1 SVG Vector Painters
+// Vector Painters
 class _PlusIconPainter extends CustomPainter {
   final Color color;
   _PlusIconPainter({required this.color});
@@ -428,9 +555,7 @@ class _PlusIconPainter extends CustomPainter {
     final w = size.width;
     final h = size.height;
 
-    // SVG: line x1="12" y1="5" x2="12" y2="19"
     canvas.drawLine(Offset(w / 2, h * (5 / 24)), Offset(w / 2, h * (19 / 24)), paint);
-    // SVG: line x1="5" y1="12" x2="19" y2="12"
     canvas.drawLine(Offset(w * (5 / 24), h / 2), Offset(w * (19 / 24), h / 2), paint);
   }
 
@@ -456,7 +581,6 @@ class _PinIconPainter extends CustomPainter {
     final scaleX = w / 24.0;
     final scaleY = h / 24.0;
 
-    // Path pin: M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z
     final path = Path();
     path.moveTo(21 * scaleX, 10 * scaleY);
     path.cubicTo(21 * scaleX, 17 * scaleY, 12 * scaleX, 23 * scaleY, 12 * scaleX, 23 * scaleY);
@@ -467,8 +591,6 @@ class _PinIconPainter extends CustomPainter {
       clockwise: true,
     );
     canvas.drawPath(path, paint);
-
-    // Circle: cx="12" cy="10" r="3"
     canvas.drawCircle(Offset(12 * scaleX, 10 * scaleY), 3 * scaleX, paint);
   }
 
@@ -492,10 +614,7 @@ class _SearchIconPainter extends CustomPainter {
     final scaleX = size.width / 24.0;
     final scaleY = size.height / 24.0;
 
-    // Circle: cx="11" cy="11" r="8"
     canvas.drawCircle(Offset(11 * scaleX, 11 * scaleY), 8 * scaleX, paint);
-
-    // Line: x1="21" y1="21" x2="16.65" y2="16.65"
     canvas.drawLine(
       Offset(21 * scaleX, 21 * scaleY),
       Offset(16.65 * scaleX, 16.65 * scaleY),
