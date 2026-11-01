@@ -29,11 +29,16 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Generate Flutter Template if Empty
+      - name: Generate Android Platform Files if needed
         run: |
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "Repository kosong dari Flutter, membuat template Flutter default dari 0..."
+          if [ ! -d "android" ]; then
+            echo "Generating platform files and preserving lib/main.dart..."
+            cp -r lib /tmp/lib_bak
             flutter create --org com.afifsuda --project-name app .
+            rm -rf lib
+            cp -r /tmp/lib_bak lib
+            # Tambahkan izin INTERNET untuk download satellite map tiles
+            sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
           fi
 
       - name: Get Dependencies
@@ -53,5 +58,5 @@ jobs:
           
           # Upload langsung ke GitHub Releases menggunakan GitHub CLI
           gh release create "$TAG" "$APK_PATH" \
-            --title "Flutter arm64 APK - Build #${{ github.run_number }}" \
-            --notes "Hasil build Flutter default template (arm64). Dibuat otomatis tanpa memakai kuota GitHub Actions Artifact Storage."
+            --title "Satellite Map Canvas arm64 - Build #${{ github.run_number }}" \
+            --notes "Porting 1:1 untitled.html ke Flutter (Canvas CustomPainter, tanpa Webview, tanpa library tambahan). Khusus arm64."
