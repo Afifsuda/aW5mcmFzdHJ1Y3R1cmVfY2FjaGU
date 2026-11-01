@@ -429,7 +429,17 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.of(context).size;
 
-    return Scaffold(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light, // Ikon Jam & Baterai PUTIH TERANG
+        statusBarBrightness: Brightness.dark,      // Background gelap -> teks putih
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemStatusBarContrastEnforced: false,
+        systemNavigationBarContrastEnforced: false,
+      ),
+      child: Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
@@ -540,6 +550,7 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
           ),
         ],
       ),
+    ),
     );
   }
 
