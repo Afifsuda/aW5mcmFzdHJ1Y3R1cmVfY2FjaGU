@@ -102,23 +102,28 @@ class TileManager extends ChangeNotifier {
     try {
       Uri url;
       if (type == 'satellite') {
+        // Satelit Esri (Tanpa API Key)
         url = Uri.parse(
           'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x',
         );
       } else if (type == 'labels') {
-        // Transparent PNG label & nama jalan (CartoDB Labels)
+        // Overlay Tempat & Batas Wilayah Esri (Transparan, Tanpa API Key)
         url = Uri.parse(
-          'https://basemaps.cartocdn.com/rastertiles/voyager_only_labels/$z/$x/$y.png',
+          'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/$z/$y/$x',
+        );
+      } else if (type == 'roads') {
+        // Overlay Jaringan Jalan & Nama Jalan Esri (Transparan, Tanpa API Key)
+        url = Uri.parse(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/$z/$y/$x',
         );
       } else {
-        // Peta jalan lengkap
+        // Peta Jalan Lengkap Esri World Street Map (Tanpa API Key)
         url = Uri.parse(
-          'https://basemaps.cartocdn.com/rastertiles/voyager/$z/$x/$y.png',
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/$z/$y/$x',
         );
       }
 
       final request = await _httpClient.getUrl(url);
-      request.headers.set('User-Agent', 'SatelliteMapFlutter/1.0');
       final response = await request.close();
       if (response.statusCode == 200) {
         final bytes = await consolidateHttpClientResponseBytes(response);
@@ -203,8 +208,18 @@ class SatelliteMapPainter extends CustomPainter {
           }
         }
 
-        // 2. Gambar Layer Label / Nama Jalan di atas Satelit (Khusus Mode Hybrid)
+        // 2. Gambar Layer Jalan & Label di atas Satelit (Khusus Mode Hybrid)
         if (mapMode == MapMode.hybrid) {
+          final roadTile = tileManager.getTile(tx, ty, zoom, type: 'roads');
+          if (roadTile != null) {
+            canvas.drawImageRect(
+              roadTile,
+              Rect.fromLTWH(0, 0, roadTile.width.toDouble(), roadTile.height.toDouble()),
+              dstRect,
+              Paint(),
+            );
+          }
+
           final labelTile = tileManager.getTile(tx, ty, zoom, type: 'labels');
           if (labelTile != null) {
             canvas.drawImageRect(
