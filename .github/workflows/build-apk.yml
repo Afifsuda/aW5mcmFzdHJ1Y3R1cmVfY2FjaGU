@@ -32,28 +32,19 @@ jobs:
           cache: true
           cache-key: "flutter-:os:-:channel:-:version:"
 
-      - name: Generate Android Platform Files if needed
+      - name: Ensure Consistent Signing Keystore
         run: |
-          if [ ! -d "android" ]; then
-            echo "Generating platform files and preserving lib/main.dart..."
-            cp -r lib /tmp/lib_bak
-            flutter create --org com.afifsuda --project-name app .
-            rm -rf lib
-            cp -r /tmp/lib_bak lib
+          if [ ! -f "android/app/release.keystore" ]; then
+            echo "Membuat release keystore tetap agar tanda tangan APK konsisten selamanya..."
+            keytool -genkey -v -keystore android/app/release.keystore \
+              -alias key0 -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android123 -keypass android123 \
+              -dname "CN=Afifsuda, OU=App, O=Dev, L=Jakarta, S=Jakarta, C=ID"
             
-            # Tambahkan izin INTERNET untuk download satellite map tiles
-            sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
-            
-            # Optimasi Gradle
-            echo "org.gradle.caching=true" >> android/gradle.properties
-            echo "org.gradle.parallel=true" >> android/gradle.properties
-            echo "org.gradle.jvmargs=-Xmx3072m -XX:+UseParallelGC" >> android/gradle.properties
-            
-            # Simpan file android ke git agar build berikutnya tidak perlu create ulang
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add android .gitignore 2>/dev/null || true
-            git commit -m "chore: persist android project files and optimizations [skip ci]" || true
+            git add android/app/release.keystore
+            git commit -m "chore: persist permanent release keystore [skip ci]" || true
             git push origin main || true
           fi
 
@@ -80,4 +71,4 @@ jobs:
           # Upload langsung ke GitHub Releases menggunakan GitHub CLI
           gh release create "$TAG" "$APK_PATH" \
             --title "Satellite Map Canvas arm64 - Build #${{ github.run_number }}" \
-            --notes "Optimized build with Gradle caching & parallel compilation. Khusus arm64."
+            --notes "APK dengan tanda tangan (signing key) konsisten dan permanen. Khusus arm64."
