@@ -12,10 +12,10 @@ void main() {
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark, // Ikon Gelap/Hitam
-      statusBarBrightness: Brightness.light,    // Background terang (overlay putih) -> teks hitam
+      statusBarIconBrightness: Brightness.light, // Ikon Jam & Baterai PUTIH
+      statusBarBrightness: Brightness.dark,      // Background gelap -> teks putih
       systemNavigationBarColor: Colors.transparent,
-      systemNavigationBarIconBrightness: Brightness.dark,
+      systemNavigationBarIconBrightness: Brightness.light,
       systemNavigationBarContrastEnforced: false,
       systemStatusBarContrastEnforced: false,
     ),
@@ -432,10 +432,10 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.dark, // Ikon Jam & Baterai GELAP/HITAM
-        statusBarBrightness: Brightness.light,    // Background terang (overlay putih) -> teks hitam
+        statusBarIconBrightness: Brightness.light, // Ikon Jam & Baterai PUTIH
+        statusBarBrightness: Brightness.dark,      // Background gelap -> teks putih
         systemNavigationBarColor: Colors.transparent,
-        systemNavigationBarIconBrightness: Brightness.dark,
+        systemNavigationBarIconBrightness: Brightness.light,
         systemStatusBarContrastEnforced: false,
         systemNavigationBarContrastEnforced: false,
       ),
@@ -462,12 +462,12 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
             ),
           ),
 
-          // Overlay Putih Halus Gradient di Topbar (UX Standard)
+          // Overlay Gelap Halus Gradient di Topbar (Agar Font & Ikon Putih Kontras Sempurna)
           Positioned(
             top: 0,
             left: 0,
             right: 0,
-            height: MediaQuery.of(context).padding.top + 28,
+            height: MediaQuery.of(context).padding.top + 32,
             child: IgnorePointer(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -475,9 +475,9 @@ class _SatelliteMapScreenState extends State<SatelliteMapScreen> {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Colors.white.withOpacity(0.35),
-                      Colors.white.withOpacity(0.12),
-                      Colors.white.withOpacity(0.0),
+                      Colors.black.withOpacity(0.65),
+                      Colors.black.withOpacity(0.35),
+                      Colors.black.withOpacity(0.0),
                     ],
                     stops: const [0.0, 0.6, 1.0],
                   ),

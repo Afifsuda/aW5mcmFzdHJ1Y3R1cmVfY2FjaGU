@@ -14,16 +14,16 @@ class MainActivity : FlutterActivity() {
             window.isNavigationBarContrastEnforced = false
         }
 
-        // Ikon status bar & jam berwarna GELAP (kontras sempurna di atas overlay putih)
+        // Ikon status bar & jam berwarna PUTIH TERANG (kontras sempurna di atas overlay gelap)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.setSystemBarsAppearance(
-                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                0,
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
             )
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility or
-                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility and
+                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
         }
     }
 }
