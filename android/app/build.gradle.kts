@@ -28,6 +28,8 @@ android {
             keyPassword = "android123"
             storeFile = file("release.keystore")
             storePassword = "android123"
+            enableV1Signing = true
+            enableV2Signing = true
         }
     }
 
