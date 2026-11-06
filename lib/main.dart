@@ -957,7 +957,15 @@ class _UploadIconPainter extends CustomPainter {
     // Arrow stem: line x1="12" y1="3" x2="12" y2="15"
     canvas.drawLine(Offset(12 * sX, 3 * sY), Offset(12 * sX, 15 * sY), paint);
 
-    @override
+    // Arrow head: polyline points="17 8 12 3 7 8"
+    final head = Path()
+      ..moveTo(17 * sX, 8 * sY)
+      ..lineTo(12 * sX, 3 * sY)
+      ..lineTo(7 * sX, 8 * sY);
+    canvas.drawPath(head, paint);
+  }
+
+  @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
