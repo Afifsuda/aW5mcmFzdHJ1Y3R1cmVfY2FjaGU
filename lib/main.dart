@@ -47,6 +47,9 @@ class _FloatingUiScreenState extends State<FloatingUiScreen> {
   final ScrollController _scrollController = ScrollController();
   bool _isPopupOpen = false;
 
+  // Toggle UI tombol kiri atas (tetap tersimpan di kode, disembunyikan sementara)
+  final bool _showTopLeftCircleButton = false;
+
   final List<Map<String, dynamic>> _messages = [
     {
       'role': 'user',
@@ -161,11 +164,17 @@ class _FloatingUiScreenState extends State<FloatingUiScreen> {
               top: topPadding + 24.0,
               left: 20.0,
               right: 20.0,
-              child: const Row(
+              child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  _TopCircleButton(),
-                  _TopCircleButton(),
+                  // Tombol kiri atas (disembunyikan sementara) atau Debug UI Performance Minimalis
+                  if (_showTopLeftCircleButton)
+                    const _TopCircleButton()
+                  else
+                    const _MinimalPerformanceDebugBadge(),
+
+                  // Tombol kanan atas
+                  const _TopCircleButton(),
                 ],
               ),
             ),
@@ -948,14 +957,144 @@ class _UploadIconPainter extends CustomPainter {
     // Arrow stem: line x1="12" y1="3" x2="12" y2="15"
     canvas.drawLine(Offset(12 * sX, 3 * sY), Offset(12 * sX, 15 * sY), paint);
 
-    // Arrow head: polyline points="17 8 12 3 7 8"
-    final head = Path()
-      ..moveTo(17 * sX, 8 * sY)
-      ..lineTo(12 * sX, 3 * sY)
-      ..lineTo(7 * sX, 8 * sY);
-    canvas.drawPath(head, paint);
+    @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// Debug UI Performance Minimalist (FPS & Frame Time)
+class _MinimalPerformanceDebugBadge extends StatefulWidget {
+  const _MinimalPerformanceDebugBadge();
+
+  @override
+  State<_MinimalPerformanceDebugBadge> createState() =>
+      _MinimalPerformanceDebugBadgeState();
+}
+
+class _MinimalPerformanceDebugBadgeState
+    extends State<_MinimalPerformanceDebugBadge> {
+  int _fps = 60;
+  double _frameTimeMs = 16.6;
+  int _frameCount = 0;
+  DateTime _lastTime = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback(_onPostFrame);
+  }
+
+  void _onPostFrame(Duration timestamp) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    _frameCount++;
+    final elapsed = now.difference(_lastTime).inMilliseconds;
+
+    if (elapsed >= 500) {
+      final currentFps = ((_frameCount * 1000) / elapsed).round().clamp(1, 120);
+      final currentFrameTime = currentFps > 0 ? 1000.0 / currentFps : 16.6;
+      setState(() {
+        _fps = currentFps;
+        _frameTimeMs = double.parse(currentFrameTime.toStringAsFixed(1));
+        _frameCount = 0;
+        _lastTime = now;
+      });
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback(_onPostFrame);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  Widget build(BuildContext context) {
+    final isGood = _fps >= 55;
+    final statusColor =
+        isGood ? const Color(0xFF10B981) : const Color(0xFFF59E0B);
+
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFFFF),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: const Color.fromRGBO(0, 0, 0, 0.06),
+          width: 1,
+        ),
+        boxShadow: const [
+          BoxShadow(
+            color: Color.fromRGBO(0, 0, 0, 0.08),
+            offset: Offset(0, 2),
+            blurRadius: 4,
+          ),
+          BoxShadow(
+            color: Color.fromRGBO(0, 0, 0, 0.16),
+            offset: Offset(0, 8),
+            blurRadius: 16,
+            spreadRadius: -2,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Live pulse dot
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: statusColor,
+              boxShadow: [
+                BoxShadow(
+                  color: statusColor.withOpacity(0.4),
+                  blurRadius: 6,
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+
+          // FPS display
+          Text(
+            '$_fps',
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF0F172A),
+              fontFamily: 'monospace',
+            ),
+          ),
+          const SizedBox(width: 3),
+          const Text(
+            'FPS',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF64748B),
+            ),
+          ),
+          const SizedBox(width: 8),
+
+          // Divider
+          Container(
+            width: 1,
+            height: 14,
+            color: const Color(0xFFE2E8F0),
+          ),
+          const SizedBox(width: 8),
+
+          // Frame Time display
+          Text(
+            '${_frameTimeMs}ms',
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF475569),
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
