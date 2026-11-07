@@ -144,7 +144,7 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
     <h2>Dashboard Belum Aktif</h2>
     <p>Instance 9Router belum berjalan di <b>localhost:20128</b>. Buka Termux dan aktifkan gateway dengan perintah:</p>
     <div class="code-box">
-      <span>$ 9router start</span>
+      <span>\$ 9router start</span>
     </div>
     <button class="btn" onclick="location.href='http://localhost:20128'">⚡ Muat Ulang Dashboard</button>
   </div>
