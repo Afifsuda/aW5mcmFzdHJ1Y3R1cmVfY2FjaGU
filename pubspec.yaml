@@ -1,7 +1,7 @@
 name: app
 description: "Satellite Map Canvas 1:1 Flutter Port"
 publish_to: "none"
-version: 1.0.9+23
+version: 1.0.10+24
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -18,5 +18,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/runtime/

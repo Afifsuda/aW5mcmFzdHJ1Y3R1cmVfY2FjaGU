@@ -79,11 +79,79 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
   void _initWebControllers() {
     _routerWebController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Colors.white);
+      ..setBackgroundColor(Colors.white)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onWebResourceError: (WebResourceError error) {
+            _showRouterFallbackError();
+          },
+        ),
+      );
 
     _linkWebController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.white);
+  }
+
+  void _showRouterFallbackError() {
+    const errorHtml = '''
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #F8FAFC; color: #1E293B;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 80vh; text-align: center;
+    }
+    .card {
+      background: #FFFFFF; border-radius: 24px;
+      padding: 32px 24px; max-width: 400px; width: 100%;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.06), 0 8px 10px -6px rgba(0,0,0,0.04);
+      border: 1px solid #E2E8F0;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #FEF3C7; color: #D97706;
+      padding: 6px 12px; border-radius: 20px; font-size: 12px;
+      font-weight: 700; margin-bottom: 16px;
+    }
+    h2 { margin: 0 0 10px 0; font-size: 19px; font-weight: 700; color: #0F172A; }
+    p { margin: 0 0 16px 0; font-size: 13.5px; line-height: 1.6; color: #64748B; }
+    .code-box {
+      background: #0F172A; color: #38BDF8; padding: 14px 16px;
+      border-radius: 12px; font-size: 13.5px; font-family: monospace;
+      font-weight: 600; text-align: left; margin-bottom: 20px;
+    }
+    .btn {
+      display: block; width: 100%;
+      background: linear-gradient(135deg, #2563EB, #1D4ED8);
+      color: white; border: none; padding: 14px; border-radius: 14px;
+      font-weight: 600; font-size: 14px; text-decoration: none;
+      cursor: pointer; box-shadow: 0 4px 12px rgba(37,99,235,0.25);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">⚠️ 9ROUTER GATEWAY OFFLINE</div>
+    <h2>Dashboard Belum Aktif</h2>
+    <p>Instance 9Router belum berjalan di <b>localhost:20128</b>. Buka Termux dan aktifkan gateway dengan perintah:</p>
+    <div class="code-box">
+      <span>$ 9router start</span>
+    </div>
+    <button class="btn" onclick="location.href='http://localhost:20128'">⚡ Muat Ulang Dashboard</button>
+  </div>
+</body>
+</html>
+''';
+    _routerWebController.loadHtmlString(errorHtml);
   }
 
   Future<void> _startRuntimeBackground() async {
@@ -456,6 +524,15 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
                                 ),
                               ],
                             ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        _CircleButton(
+                          onTap: () => controller.reload(),
+                          child: const Icon(
+                            Icons.refresh_rounded,
+                            size: 20,
+                            color: Color(0xFF334155),
                           ),
                         ),
                       ],
