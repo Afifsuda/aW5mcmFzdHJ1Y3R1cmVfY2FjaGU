@@ -53,8 +53,32 @@ jobs:
         with:
           cache-read-only: false
 
-      - name: Get Dependencies
-        run: flutter pub get
+      - name: Get Dependencies & Inject Node.js Mobile Libnode
+        run: |
+          flutter pub get
+          
+          NODE_FLUTTER_PATH=$(find $HOME/.pub-cache -type d -name "node_flutter-*" | head -n 1)
+          echo "Found node_flutter at: $NODE_FLUTTER_PATH"
+          
+          if [ -n "$NODE_FLUTTER_PATH" ]; then
+            mkdir -p "$NODE_FLUTTER_PATH/android/libnode"
+            echo "Mengunduh prebuilt resmi Node.js Mobile Android..."
+            curl -sSL "https://github.com/nodejs-mobile/nodejs-mobile/releases/download/v18.20.4/nodejs-mobile-v18.20.4-android.zip" -o nodejs-mobile.zip
+            unzip -q nodejs-mobile.zip -d "$NODE_FLUTTER_PATH/android/libnode/"
+            rm -f nodejs-mobile.zip
+            echo "libnode terpasang:"
+            ls -la "$NODE_FLUTTER_PATH/android/libnode/bin/" || true
+          fi
+
+      - name: Package Standalone 9Router Runtime Asset
+        run: |
+          mkdir -p /tmp/9router_pack
+          cd /tmp/9router_pack
+          npm init -y
+          npm install 9router --omit=dev --no-audit --no-fund
+          zip -qr "$GITHUB_WORKSPACE/9router-runtime.zip" node_modules package.json
+          cd "$GITHUB_WORKSPACE"
+          echo "Ukuran file 9router-runtime.zip: $(ls -lh 9router-runtime.zip | awk '{print $5}')"
 
       - name: Build APK (Khusus arm64)
         run: flutter build apk --release --target-platform android-arm64
@@ -64,11 +88,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          RUNTIME_PATH="9router-runtime.zip"
           TAG="v1.0.${{ github.run_number }}"
           
           echo "Ukuran file APK: $(ls -lh $APK_PATH | awk '{print $5}')"
+          echo "Ukuran file Runtime: $(ls -lh $RUNTIME_PATH | awk '{print $5}')"
           
           # Upload langsung ke GitHub Releases menggunakan GitHub CLI
-          gh release create "$TAG" "$APK_PATH" \
+          gh release create "$TAG" "$APK_PATH" "$RUNTIME_PATH" \
             --title "Satellite Map Canvas arm64 - Build #${{ github.run_number }}" \
-            --notes "APK dengan tanda tangan (signing key) konsisten dan permanen. Khusus arm64."
+            --notes "APK Mandiri (~25MB) dengan native Node.js Mobile Engine + aset runtime 9Router terpisah."

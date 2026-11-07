@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:node_flutter/node_flutter.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 void main() {
@@ -62,6 +65,11 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
   bool _isWorking = false;
   HttpClientRequest? _activeRequest;
 
+  // Runtime Downloader & State
+  bool _isDownloadingRuntime = false;
+  double _downloadProgress = 0.0;
+  String _runtimeStatusMessage = 'Inisialisasi Node.js...';
+
   // Webview Canvas States
   bool _isRouterCanvasOpen = false;
   bool _isLinkCanvasOpen = false;
@@ -80,6 +88,14 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
     _routerWebController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.white)
+      ..addJavaScriptChannel(
+        'AppBridge',
+        onMessageReceived: (JavaScriptMessage msg) {
+          if (msg.message == 'start_runtime') {
+            _setupAndStartRuntime();
+          }
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onWebResourceError: (WebResourceError error) {
@@ -118,35 +134,27 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
     }
     .badge {
       display: inline-flex; align-items: center; gap: 6px;
-      background: #FEF3C7; color: #D97706;
-      padding: 6px 12px; border-radius: 20px; font-size: 12px;
+      background: #EFF6FF; color: #2563EB;
+      padding: 6px 14px; border-radius: 20px; font-size: 12px;
       font-weight: 700; margin-bottom: 16px;
     }
-    h2 { margin: 0 0 10px 0; font-size: 19px; font-weight: 700; color: #0F172A; }
-    p { margin: 0 0 16px 0; font-size: 13.5px; line-height: 1.6; color: #64748B; }
-    .code-box {
-      background: #0F172A; color: #38BDF8; padding: 14px 16px;
-      border-radius: 12px; font-size: 13.5px; font-family: monospace;
-      font-weight: 600; text-align: left; margin-bottom: 20px;
-    }
+    h2 { margin: 0 0 10px 0; font-size: 20px; font-weight: 700; color: #0F172A; }
+    p { margin: 0 0 20px 0; font-size: 14px; line-height: 1.6; color: #64748B; }
     .btn {
       display: block; width: 100%;
       background: linear-gradient(135deg, #2563EB, #1D4ED8);
-      color: white; border: none; padding: 14px; border-radius: 14px;
-      font-weight: 600; font-size: 14px; text-decoration: none;
+      color: white; border: none; padding: 15px; border-radius: 14px;
+      font-weight: 600; font-size: 14.5px; text-decoration: none;
       cursor: pointer; box-shadow: 0 4px 12px rgba(37,99,235,0.25);
     }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="badge">⚠️ 9ROUTER GATEWAY OFFLINE</div>
-    <h2>Dashboard Belum Aktif</h2>
-    <p>Instance 9Router belum berjalan di <b>localhost:20128</b>. Buka Termux dan aktifkan gateway dengan perintah:</p>
-    <div class="code-box">
-      <span>\$ 9router start</span>
-    </div>
-    <button class="btn" onclick="location.href='http://localhost:20128'">⚡ Muat Ulang Dashboard</button>
+    <div class="badge">⚡ NATIVE APK RUNTIME</div>
+    <h2>9Router Belum Aktif</h2>
+    <p>Gateway 9Router belum berjalan di <b>localhost:20128</b>.<br>Tekan tombol di bawah untuk menyalakan atau setup runtime mandiri di dalam aplikasi.</p>
+    <button class="btn" onclick="if(window.AppBridge){window.AppBridge.postMessage('start_runtime');}else{location.href='http://localhost:20128';}">🚀 Nyalakan / Setup 9Router Sekarang</button>
   </div>
 </body>
 </html>
@@ -155,13 +163,125 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
   }
 
   Future<void> _startRuntimeBackground() async {
-    // Memastikan environment runtime Node.js & 9Router di APK
     try {
-      final appDir = await Directory.systemTemp.createTemp('app_runtime');
-      debugPrint('[Runtime] Initialized runtime storage: ${appDir.path}');
+      debugPrint('[Node.js] Memulai Node.js Mobile engine di dalam APK...');
+      await Nodejs.start();
+      debugPrint('[Node.js] Node.js Mobile engine berhasil aktif!');
+
+      Nodejs.onMessageReceived.listen((event) {
+        debugPrint('[Node.js Event] $event');
+        if (event['channelName'] == 'router-status' &&
+            (event['message'] == 'RUNNING' || event['message'] == 'ALREADY_RUNNING')) {
+          _pollPortAndReload();
+        }
+      });
+
+      final docDir = await getApplicationDocumentsDirectory();
+      final runtimeDir = Directory('${docDir.path}/9router_runtime');
+      if (await runtimeDir.exists()) {
+        _startRouterProcess(runtimeDir.path);
+      }
     } catch (e) {
-      debugPrint('[Runtime] Initialization error: $e');
+      debugPrint('[Node.js] Initialization error: $e');
     }
+  }
+
+  Future<void> _setupAndStartRuntime() async {
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      final runtimeDir = Directory('${docDir.path}/9router_runtime');
+
+      if (!await runtimeDir.exists()) {
+        setState(() {
+          _isDownloadingRuntime = true;
+          _downloadProgress = 0.0;
+          _runtimeStatusMessage = 'Mengunduh bundle 9Router (~18MB)...';
+        });
+
+        final zipFile = File('${docDir.path}/9router-runtime.zip');
+        final request = await HttpClient().getUrl(
+          Uri.parse(
+              'https://github.com/Afifsuda/aW5mcmFzdHJ1Y3R1cmVfY2FjaGU/releases/latest/download/9router-runtime.zip'),
+        );
+        final response = await request.close();
+        final totalBytes = response.contentLength;
+        var receivedBytes = 0;
+
+        final bytes = <int>[];
+        await for (final chunk in response) {
+          bytes.addAll(chunk);
+          receivedBytes += chunk.length;
+          if (totalBytes > 0 && mounted) {
+            setState(() {
+              _downloadProgress = receivedBytes / totalBytes;
+              _runtimeStatusMessage =
+                  'Mengunduh runtime: ${(_downloadProgress * 100).toStringAsFixed(0)}%';
+            });
+          }
+        }
+
+        await zipFile.writeAsBytes(bytes);
+
+        setState(() {
+          _runtimeStatusMessage = 'Mengekstrak paket 9Router...';
+        });
+
+        final archive = ZipDecoder().decodeBytes(bytes);
+        for (final file in archive) {
+          final filename = '${runtimeDir.path}/${file.name}';
+          if (file.isFile) {
+            final outFile = File(filename);
+            await outFile.parent.create(recursive: true);
+            await outFile.writeAsBytes(file.content as List<int>);
+          } else {
+            await Directory(filename).create(recursive: true);
+          }
+        }
+      }
+
+      setState(() {
+        _isDownloadingRuntime = false;
+        _runtimeStatusMessage = 'Menjalankan gateway 9Router...';
+      });
+
+      _startRouterProcess(runtimeDir.path);
+    } catch (e) {
+      debugPrint('[Runtime Setup] Error: $e');
+      if (mounted) {
+        setState(() {
+          _isDownloadingRuntime = false;
+          _runtimeStatusMessage = 'Gagal setup: $e';
+        });
+      }
+    }
+  }
+
+  void _startRouterProcess(String runtimePath) {
+    debugPrint('[Node.js] Memulai proses 9router dari: $runtimePath');
+    Nodejs.sendMessage('start-9router', runtimePath);
+    _pollPortAndReload();
+  }
+
+  void _pollPortAndReload() {
+    var attempts = 0;
+    Timer.periodic(const Duration(seconds: 1), (timer) async {
+      attempts++;
+      try {
+        final socket = await Socket.connect('127.0.0.1', 20128,
+            timeout: const Duration(milliseconds: 500));
+        socket.destroy();
+        timer.cancel();
+        debugPrint('[Runtime] Port 20128 siap! Memuat dashboard...');
+        if (mounted) {
+          _routerWebController
+              .loadRequest(Uri.parse(ProductionConfig.routerDashboardUrl));
+        }
+      } catch (_) {
+        if (attempts > 30) {
+          timer.cancel();
+        }
+      }
+    });
   }
 
   void _openRouterDashboard() {
@@ -416,6 +536,66 @@ class _MainWorkspaceScreenState extends State<MainWorkspaceScreen> {
             onClose: _closeLinkCanvas,
             onOpenExternal: () {},
           ),
+
+          // 6. In-App Runtime Download Overlay
+          if (_isDownloadingRuntime)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black.withOpacity(0.45),
+                child: Center(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 32),
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color.fromRGBO(0, 0, 0, 0.15),
+                          blurRadius: 20,
+                          offset: Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 3.5,
+                            valueColor:
+                                AlwaysStoppedAnimation<Color>(Color(0xFF2563EB)),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Text(
+                          _runtimeStatusMessage,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF0F172A),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: LinearProgressIndicator(
+                            value: _downloadProgress > 0 ? _downloadProgress : null,
+                            minHeight: 8,
+                            backgroundColor: const Color(0xFFE2E8F0),
+                            valueColor:
+                                const AlwaysStoppedAnimation<Color>(Color(0xFF2563EB)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

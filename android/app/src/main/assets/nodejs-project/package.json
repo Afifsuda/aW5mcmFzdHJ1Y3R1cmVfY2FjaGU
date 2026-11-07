@@ -1,0 +1,7 @@
+{
+  "name": "embedded-node-router",
+  "version": "1.0.0",
+  "description": "Embedded Node.js runtime for 9Router",
+  "main": "main.js",
+  "private": true
+}
