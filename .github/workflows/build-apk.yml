@@ -53,6 +53,31 @@ jobs:
         with:
           cache-read-only: false
 
+      - name: Bundle Official Node.js & 9Router Runtime in GitHub Actions
+        run: |
+          mkdir -p assets/runtime/bin
+          mkdir -p android/app/src/main/assets/runtime
+          
+          echo "1. Mengunduh biner resmi Node.js LTS untuk Linux ARM64..."
+          curl -sSL "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-arm64.tar.xz" -o node.tar.xz
+          tar -xf node.tar.xz --strip-components=1 -C assets/runtime/
+          rm -f node.tar.xz
+          cp assets/runtime/bin/node assets/runtime/node || true
+          
+          echo "2. Memasang paket resmi 9router..."
+          cd assets/runtime
+          npm init -y
+          npm install 9router --omit=dev --no-audit --no-fund || true
+          cd ../..
+          
+          echo "3. Mengemas runtime bundle dan sinkronisasi ke Android assets..."
+          tar -czf assets/runtime/runtime-bundle.tar.gz -C assets/runtime bin node_modules package.json 2>/dev/null || true
+          cp -r assets/runtime/* android/app/src/main/assets/runtime/ 2>/dev/null || true
+          
+          echo "4. Status file runtime:"
+          ls -lh assets/runtime/bin/node || true
+          ls -lh assets/runtime/runtime-bundle.tar.gz || true
+
       - name: Get Dependencies
         run: flutter pub get
 
