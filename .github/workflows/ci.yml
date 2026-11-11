@@ -4,8 +4,6 @@ on:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +11,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build Release APK
+    name: Build & Release APK
     runs-on: ubuntu-latest
 
     steps:
@@ -32,32 +30,31 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Verify Flutter Installation
-        run: flutter doctor -v
-
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Build Android Release APK
         run: flutter build apk --release
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 7
+      - name: Generate Release Tag Name
+        id: release_info
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+          else
+            TAG_NAME="v1.0.0-build${{ github.run_number }}"
+          fi
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
-      - name: Publish GitHub Release (if tag or dispatch)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+      - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: build/app/outputs/flutter-apk/app-release.apk
-          tag_name: ${{ github.ref_name || 'v1.0.0-canvas' }}
-          name: "Canvas Release ${{ github.ref_name || 'v1.0.0-canvas' }}"
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: "Canvas Release ${{ steps.release_info.outputs.tag_name }}"
           body: |
-            Automated Release Build for Flutter Canvas APK (White Screen).
-            Built by GitHub Actions.
+            Release build APK Flutter (Layar Putih Bersih).
+            Commit: ${{ github.sha }}
           draft: false
           prerelease: false
         env:
