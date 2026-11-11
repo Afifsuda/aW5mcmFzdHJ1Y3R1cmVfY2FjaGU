@@ -1,4 +1,4 @@
-name: Antigravity Native Android CI/CD Pipeline
+name: Build Flutter Canvas APK
 
 on:
   push:
@@ -7,220 +7,58 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: 'Publish release to GitHub Releases?'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
 
 jobs:
-  # ==========================================================
-  # STAGE 1: VALIDATION & ENVIRONMENT CHECKS
-  # ==========================================================
-  validate:
-    name: Code & Environment Validation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Source Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Validate Repository Layout
-        run: |
-          echo "Memeriksa struktur dasar repositori..."
-          test -f README.md && echo "✓ README.md valid"
-          test -f .gitignore && echo "✓ .gitignore valid"
-          if [ -f gradlew ]; then
-            echo "✓ Gradle wrapper terdeteksi"
-            chmod +x gradlew
-          else
-            echo "ℹ Repositori berada pada baseline clean state (belum ada kode aplikasi Android)"
-          fi
-
-  # ==========================================================
-  # STAGE 2: RUNTIME INTEGRITY & ARM64 PATCHES
-  # ==========================================================
-  prepare-runtime:
-    name: Prepare & Patch Antigravity Core Runtime (ARM64)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Source Code
-        uses: actions/checkout@v4
-
-      - name: Cache Antigravity Standalone Runtime
-        id: cache-agy
-        uses: actions/cache@v4
-        with:
-          path: /tmp/antigravity_cache
-          key: antigravity-standalone-core-v2-lse-patched
-
-      - name: Fetch and Assemble Antigravity ARM64 Runtime
-        if: steps.cache-agy.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p /tmp/agy_clone
-          echo "Mengambil komponen runtime Antigravity Standalone..."
-          git clone --depth=1 https://github.com/werdio325-png/antigravity-android.git /tmp/agy_clone
-          
-          # 1. Ekstrak pristine binary
-          mkdir -p /tmp/raw_core
-          tar -xzf /tmp/agy_clone/modules/core/pristine/language_server.tar.gz -C /tmp/raw_core/
-          
-          # 2. Terapkan full patch pipeline (ARMv8.0-A LSE bypass, crash suppressor, sigill protection, faccessat/fchmodat seccomp fix, resolv redirect)
-          echo "Menerapkan Antigravity Binary Patches (LSE, SIGILL, Seccomp, Resolv)..."
-          python3 /tmp/agy_clone/modules/patches/pipeline.py /tmp/raw_core/language_server
-          
-          # 3. Assemble complete runtime layout (bin, lib, etc, certs, seed, manifest)
-          echo "Merakit struktur direktori runtime..."
-          mkdir -p /tmp/antigravity_cache
-          python3 /tmp/agy_clone/modules/core/bundle/assemble.py \
-            --core-bin /tmp/raw_core/language_server \
-            --module-root /tmp/agy_clone/modules/core \
-            --out-dir /tmp/antigravity_cache
-          
-          # 4. Copy Web bundle Antigravity
-          echo "Menyalin Web IDE bundle..."
-          mkdir -p /tmp/antigravity_cache/web
-          cp -r /tmp/agy_clone/web/* /tmp/antigravity_cache/web/
-          
-          # 5. Pastikan liblse_compat.so terpasang
-          if [ -f /tmp/agy_clone/env/liblse_compat/liblse_compat.so ]; then
-            cp /tmp/agy_clone/env/liblse_compat/liblse_compat.so /tmp/antigravity_cache/lib/liblse_compat.so
-          fi
-          chmod 755 /tmp/antigravity_cache/lib/*.so* || true
-          chmod 755 /tmp/antigravity_cache/bin/* || true
-          
-          rm -rf /tmp/raw_core /tmp/agy_clone
-
-      - name: Package Standalone Runtime Archive
-        run: |
-          cd /tmp/antigravity_cache
-          zip -qr "$GITHUB_WORKSPACE/antigravity-bionic-arm64.zip" bin lib etc certs seed web manifest.json
-          cd "$GITHUB_WORKSPACE"
-          echo "Ukuran file antigravity-bionic-arm64.zip: $(ls -lh antigravity-bionic-arm64.zip | awk '{print $5}')"
-
-      - name: Upload Runtime Bundle Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: antigravity-bionic-arm64
-          path: antigravity-bionic-arm64.zip
-          retention-days: 7
-
-  # ==========================================================
-  # STAGE 3: ANDROID RELEASE BUILD
-  # ==========================================================
   build-apk:
-    name: Build Android Release APK
-    needs: [validate, prepare-runtime]
+    name: Build Release APK
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
-
-      - name: Download Runtime Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: antigravity-bionic-arm64
-          path: .
-
-      - name: Check Project State
-        id: check-project
-        run: |
-          if [ -f gradlew ]; then
-            echo "has_android=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_android=false" >> $GITHUB_OUTPUT
-            echo "Baseline repository: Belum ada konfigurasi Gradle Android. Melewati langkah kompilasi APK."
-          fi
 
       - name: Set up Java 17
-        if: steps.check-project.outputs.has_android == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Gradle Cache
-        if: steps.check-project.outputs.has_android == 'true'
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
         with:
-          cache-read-only: false
+          channel: 'stable'
+          cache: true
 
-      - name: Compile Release APK
-        if: steps.check-project.outputs.has_android == 'true'
-        env:
-          GITHUB_RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --build-cache --parallel
+      - name: Verify Flutter Installation
+        run: flutter doctor -v
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build Android Release APK
+        run: flutter build apk --release
 
       - name: Upload APK Artifact
-        if: steps.check-project.outputs.has_android == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
-          retention-days: 14
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
 
-  # ==========================================================
-  # STAGE 4: CHECKSUMS & ARTIFACT METRICS
-  # ==========================================================
-  checksums:
-    name: Generate Checksums & Integrity
-    needs: [build-apk]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Generate SHA-256 Checksums
-        run: |
-          echo "Menghitung checksum berkas rilis..."
-          mkdir -p dist
-          find . -maxdepth 3 -type f \( -name "*.apk" -o -name "*.zip" \) -exec cp {} dist/ \;
-          cd dist
-          sha256sum * > SHA256SUMS.txt || true
-          cat SHA256SUMS.txt
-          cd ..
-
-      - name: Upload Integrity Checksums
-        uses: actions/upload-artifact@v4
+      - name: Publish GitHub Release (if tag or dispatch)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
         with:
-          name: release-checksums
-          path: dist/SHA256SUMS.txt
-
-  # ==========================================================
-  # STAGE 5: AUTOMATED GITHUB RELEASES (ON TAG OR DISPATCH)
-  # ==========================================================
-  publish-release:
-    name: Publish GitHub Release
-    needs: [checksums]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Publish Release to GitHub
+          files: build/app/outputs/flutter-apk/app-release.apk
+          tag_name: ${{ github.ref_name || 'v1.0.0-canvas' }}
+          name: "Canvas Release ${{ github.ref_name || 'v1.0.0-canvas' }}"
+          body: |
+            Automated Release Build for Flutter Canvas APK (White Screen).
+            Built by GitHub Actions.
+          draft: false
+          prerelease: false
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG_NAME="${{ github.ref_name }}"
-          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "main" ]; then
-            TAG_NAME="v1.0.${{ github.run_number }}"
-          fi
-
-          FILES=()
-          for f in $(find . -maxdepth 3 -type f \( -name "*.apk" -o -name "*.zip" -o -name "SHA256SUMS.txt" \)); do
-            FILES+=("$f")
-          done
-
-          echo "Membuat rilis GitHub untuk tag $TAG_NAME dengan ${#FILES[@]} berkas..."
-          gh release create "$TAG_NAME" "${FILES[@]}" \
-            --title "Google Antigravity Release $TAG_NAME" \
-            --notes "Rilis otomatis dari pipeline CI/CD Antigravity Native Android." \
-            --generate-notes
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
