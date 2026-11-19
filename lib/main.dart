@@ -96,10 +96,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   StreamSubscription<dynamic>? _micSub;
   StreamSubscription<dynamic>? _tunnelSub;
 
-  // Host (Pengirim) state
+  // Host (Pengirim) state — murni 127.0.0.1 untuk Tunnel Publik
   HttpServer? _server;
   final List<WebSocket> _clients = [];
-  String _hostIp = 'Mendeteksi IP...';
   String _tunnelStatus = 'stopped';
   String? _tunnelUrl;
   String _tunnelMessage = 'Tunnel nonaktif';
@@ -107,9 +106,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   // Client (Penerima) state
   WebSocket? _clientSocket;
   Timer? _keepaliveTimer;
+  Timer? _reconnectTimer;
+  bool _manualDisconnect = false;
   bool _isConnected = false;
   bool _isConnecting = false;
-  String _clientStatus = 'Masukkan Link Tunnel atau IP Hotspot';
+  String _clientStatus = 'Tempel Link Tunnel dari HP 1';
   final TextEditingController _targetController = TextEditingController();
 
   @override
@@ -166,49 +167,25 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _micSub?.cancel();
     _tunnelSub?.cancel();
     _keepaliveTimer?.cancel();
+    _reconnectTimer?.cancel();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     _stopHostServer();
-    _disconnectClient();
+    _disconnectClient(manual: true);
     _targetController.dispose();
     super.dispose();
   }
 
-  Future<String> _detectLocalIp() async {
-    try {
-      final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-        includeLoopback: false,
-      );
-      String? fallbackIp;
-      for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          final ip = addr.address;
-          if (ip.startsWith('192.168.')) {
-            return ip;
-          }
-          fallbackIp ??= ip;
-        }
-      }
-      return fallbackIp ?? '127.0.0.1';
-    } catch (_) {
-      return '127.0.0.1';
-    }
-  }
-
   Future<void> _startHostServer() async {
     await _stopHostServer();
-    final ip = await _detectLocalIp();
-    if (!mounted) return;
-    setState(() => _hostIp = ip);
-
     try {
       final server =
-          await HttpServer.bind(InternetAddress.anyIPv4, AppTokens.wsPort);
+          await HttpServer.bind(InternetAddress.loopbackIPv4, AppTokens.wsPort);
       _server = server;
       server.listen((HttpRequest req) async {
         if (WebSocketTransformer.isUpgradeRequest(req)) {
           final ws = await WebSocketTransformer.upgrade(req);
+          ws.pingInterval = const Duration(seconds: 10);
           if (!mounted) {
             await ws.close();
             return;
@@ -217,7 +194,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           ws.add(jsonEncode({'pressed': _localPressed}));
           ws.listen(
             (data) {
-              // Abaikan ping keepalive dari client
+              if (data is String && data.contains('"ping"')) {
+                try {
+                  ws.add('{"pong":1}');
+                } catch (_) {}
+              }
             },
             onDone: () {
               if (mounted) setState(() => _clients.remove(ws));
@@ -228,12 +209,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           );
         } else {
           req.response.statusCode = HttpStatus.ok;
-          req.response.write('Antigravity Bundled WS Server Ready');
+          req.response.write('Antigravity Tunnel WS Ready');
           await req.response.close();
         }
       });
     } catch (e) {
-      if (mounted) setState(() => _hostIp = 'Error: $e');
+      if (mounted) {
+        setState(() => _tunnelMessage = 'Server lokal gagal: $e');
+      }
     }
   }
 
@@ -266,7 +249,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     );
   }
 
-  String? _normalizeTargetWsUrl(String input) {
+  String? _normalizeTunnelWsUrl(String input) {
     var raw = input.trim();
     if (raw.isEmpty) return null;
     if (raw.endsWith('/')) {
@@ -281,33 +264,36 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     if (raw.startsWith('wss://') || raw.startsWith('ws://')) {
       return raw;
     }
-    if (raw.contains('trycloudflare.com')) {
-      return 'wss://$raw';
-    }
-    return raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
+    return 'wss://$raw';
   }
 
-  Future<void> _connectToHost() async {
-    final wsUrl = _normalizeTargetWsUrl(_targetController.text);
+  Future<void> _connectToHost({bool isRetry = false}) async {
+    final wsUrl = _normalizeTunnelWsUrl(_targetController.text);
     if (wsUrl == null) return;
-    await _disconnectClient();
+    if (!isRetry) {
+      _manualDisconnect = false;
+      _reconnectTimer?.cancel();
+    }
+    await _closeSocketOnly();
     if (!mounted) return;
     setState(() {
       _isConnecting = true;
-      _clientStatus = 'Menghubungkan...';
+      _clientStatus =
+          isRetry ? 'Menyambungkan ulang...' : 'Menghubungkan ke tunnel...';
     });
 
     try {
       final ws =
           await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
+      ws.pingInterval = const Duration(seconds: 10);
       if (!mounted) {
         await ws.close();
         return;
       }
       _clientSocket = ws;
       _keepaliveTimer?.cancel();
-      _keepaliveTimer = Timer.periodic(const Duration(seconds: 20), (_) {
-        if (_isConnected && _socketAlive(ws)) {
+      _keepaliveTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+        if (_isConnected && ws.readyState == WebSocket.open) {
           try {
             ws.add('{"ping":1}');
           } catch (_) {}
@@ -343,57 +329,57 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                 .catchError((_) {});
           }
         },
-        onDone: () {
-          _keepaliveTimer?.cancel();
-          _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-          if (mounted) {
-            setState(() {
-              _isConnected = false;
-              _remotePressed = false;
-              _statusTextOnDisconnect();
-            });
-          }
-        },
-        onError: (_) {
-          _keepaliveTimer?.cancel();
-          _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-          if (mounted) {
-            setState(() {
-              _isConnected = false;
-              _remotePressed = false;
-              _clientStatus = 'Koneksi error / gagal';
-            });
-          }
-        },
+        onDone: () => _handleSocketDrop(
+          'Terputus (code: ${ws.closeCode ?? "-"}), mencoba ulang...',
+        ),
+        onError: (err) => _handleSocketDrop('Error: $err, mencoba ulang...'),
       );
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isConnected = false;
-          _isConnecting = false;
-          _clientStatus = 'Gagal konek (cek link/IP & pastikan HP 1 aktif)';
-        });
-      }
+      _handleSocketDrop('Gagal konek: $e');
     }
   }
 
-  bool _socketAlive(WebSocket ws) => ws.readyState == WebSocket.open;
-
-  void _statusTextOnDisconnect() {
-    _clientStatus = 'Terputus dari host';
+  void _handleSocketDrop(String msg) {
+    _keepaliveTimer?.cancel();
+    _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+    if (!mounted) return;
+    setState(() {
+      _isConnected = false;
+      _isConnecting = false;
+      _remotePressed = false;
+      _clientStatus = _manualDisconnect ? 'Terputus' : msg;
+    });
+    if (!_manualDisconnect && _role == NodeRole.receiver) {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = Timer(const Duration(seconds: 2), () {
+        if (mounted && !_manualDisconnect && _role == NodeRole.receiver) {
+          _connectToHost(isRetry: true);
+        }
+      });
+    }
   }
 
-  Future<void> _disconnectClient() async {
+  Future<void> _closeSocketOnly() async {
     _keepaliveTimer?.cancel();
     _keepaliveTimer = null;
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     await _clientSocket?.close().catchError((_) {});
     _clientSocket = null;
+  }
+
+  Future<void> _disconnectClient({bool manual = true}) async {
+    _manualDisconnect = manual;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await _closeSocketOnly();
     if (mounted) {
       setState(() {
         _isConnected = false;
         _isConnecting = false;
         _remotePressed = false;
+        if (manual) {
+          _clientStatus = 'Terputus';
+        }
       });
     }
   }
@@ -408,7 +394,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _remotePressed = false;
     });
     if (next == NodeRole.sender) {
-      await _disconnectClient();
+      await _disconnectClient(manual: true);
       await _checkOrRequestMic();
       await _startHostServer();
     } else {
@@ -527,7 +513,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'Lokal: $_hostIp:${AppTokens.wsPort} • Mic: ${_micGranted ? "Aktif" : "Belum"}',
+                  'Mic: ${_micGranted ? "Aktif" : "Belum izin"}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
@@ -535,7 +521,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   ),
                 ),
                 Text(
-                  '${_clients.length} terhubung',
+                  '${_clients.length} penerima terhubung',
                   style: const TextStyle(
                     fontSize: 11,
                     color: AppTokens.inkMuted,
@@ -565,7 +551,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                             ? 'Matikan Tunnel Publik'
                             : (_tunnelStatus == 'starting'
                                 ? 'Membuka Tunnel...'
-                                : 'Mulai Tunnel Publik (Beda Jaringan)'),
+                                : 'Mulai Tunnel Publik'),
                         style: const TextStyle(fontSize: 12),
                       ),
                     ),
@@ -602,7 +588,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               alignment: Alignment.centerLeft,
               child: Text(
                 _tunnelUrl ?? _tunnelMessage,
-                maxLines: 1,
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 11,
@@ -622,12 +608,12 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                     height: 36,
                     child: TextField(
                       controller: _targetController,
-                      keyboardType: TextInputType.text,
+                      keyboardType: TextInputType.url,
                       autocorrect: false,
                       enableSuggestions: false,
                       style: const TextStyle(fontSize: 12),
                       decoration: InputDecoration(
-                        hintText: 'Tempel Link Tunnel atau IP Hotspot',
+                        hintText: 'Tempel Link Tunnel (https://...)',
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 10,
                           vertical: 8,
@@ -648,7 +634,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   child: ElevatedButton(
                     onPressed: _isConnecting
                         ? null
-                        : (_isConnected ? _disconnectClient : _connectToHost),
+                        : (_isConnected
+                            ? () => _disconnectClient(manual: true)
+                            : () => _connectToHost()),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _isConnected
                           ? AppTokens.bgPrimaryPressed
