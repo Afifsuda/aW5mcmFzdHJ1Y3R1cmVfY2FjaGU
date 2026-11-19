@@ -70,7 +70,7 @@ jobs:
 
       - name: Build Android Release APK
         if: steps.project_check.outputs.exists == 'true'
-        run: flutter build apk --release --android-skip-build-dependency-validation
+        run: flutter build apk --release --target-platform android-arm64 --android-skip-build-dependency-validation
 
       - name: Cleanup Keystore Secrets
         if: always() && steps.project_check.outputs.exists == 'true'
