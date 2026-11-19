@@ -199,7 +199,6 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       server.listen((HttpRequest req) async {
         if (WebSocketTransformer.isUpgradeRequest(req)) {
           final ws = await WebSocketTransformer.upgrade(req);
-          ws.pingInterval = const Duration(seconds: 10);
           if (!mounted) {
             await ws.close();
             return;
@@ -339,14 +338,13 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     try {
       final ws =
           await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
-      ws.pingInterval = const Duration(seconds: 10);
       if (!mounted) {
         await ws.close();
         return;
       }
       _clientSocket = ws;
       _keepaliveTimer?.cancel();
-      _keepaliveTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      _keepaliveTimer = Timer.periodic(const Duration(seconds: 15), (_) {
         if (_isConnected && ws.readyState == WebSocket.open) {
           try {
             ws.add('{"ping":1}');
