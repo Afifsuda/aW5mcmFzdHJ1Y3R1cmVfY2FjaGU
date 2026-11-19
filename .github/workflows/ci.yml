@@ -52,6 +52,14 @@ jobs:
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
           curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" \
             -o android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so
+          python3 -c '
+          p = "android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so"
+          data = open(p, "rb").read()
+          count = data.count(b"/etc/resolv.conf")
+          patched = data.replace(b"/etc/resolv.conf", b"etc//resolv.conf")
+          open(p, "wb").write(patched)
+          print(f"Patched /etc/resolv.conf -> etc//resolv.conf ({count} occurrences)")
+          '
           chmod 755 android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so
           ls -lh android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 

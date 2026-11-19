@@ -159,6 +159,12 @@ class TunnelService : Service() {
         }
 
         try {
+            val etcDir = File(filesDir, "etc")
+            if (!etcDir.exists()) etcDir.mkdirs()
+            File(etcDir, "resolv.conf").writeText(
+                "options timeout:2 attempts:2\nnameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 8.8.4.4\n"
+            )
+
             val pb = ProcessBuilder(
                 bin.absolutePath,
                 "tunnel",
@@ -168,16 +174,27 @@ class TunnelService : Service() {
             )
             pb.directory(filesDir)
             pb.environment()["HOME"] = filesDir.absolutePath
+            pb.environment()["GODEBUG"] = "netdns=go"
+            val apexCerts = File("/apex/com.android.conscrypt/cacerts")
+            pb.environment()["SSL_CERT_DIR"] = if (apexCerts.isDirectory) {
+                "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
+            } else {
+                "/system/etc/security/cacerts"
+            }
             pb.redirectErrorStream(true)
 
             val proc = pb.start()
             process = proc
 
             readerThread = Thread {
+                var lastLine = ""
                 try {
                     BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                         while (!stopping) {
                             val text = reader.readLine() ?: break
+                            if (text.isNotBlank()) {
+                                lastLine = text.trim()
+                            }
                             val match = TRYCLOUDFLARE_REGEX.find(text)
                             if (match != null) {
                                 val foundUrl = match.value
@@ -188,7 +205,8 @@ class TunnelService : Service() {
                     }
                     val exitCode = proc.waitFor()
                     if (!stopping) {
-                        TunnelBus.emit("stopped", null, "Tunnel berhenti (exit $exitCode)")
+                        val detail = if (lastLine.isNotEmpty()) " ($lastLine)" else ""
+                        TunnelBus.emit("error", null, "Tunnel berhenti (exit $exitCode)$detail")
                     }
                 } catch (e: Throwable) {
                     if (!stopping) {
