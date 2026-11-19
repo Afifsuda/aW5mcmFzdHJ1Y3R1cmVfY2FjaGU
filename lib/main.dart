@@ -71,6 +71,8 @@ class FlutterNativeApp extends StatelessWidget {
 
 enum NodeRole { sender, receiver }
 
+enum NetMode { relay, hotspot }
+
 class VoiceNodeScreen extends StatefulWidget {
   const VoiceNodeScreen({super.key});
 
@@ -84,44 +86,46 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   static const EventChannel _audioStreamChannel =
       EventChannel('com.afifsuda.canvas/audio_stream');
 
+  NetMode _netMode = NetMode.relay;
   NodeRole _role = NodeRole.sender;
+
   bool _localPressed = false;
   bool _remotePressed = false;
   bool _micGranted = false;
   int? _activePointer;
   StreamSubscription<dynamic>? _micSub;
 
-  // Host (Pengirim) state
+  // Hotspot Host state (Mode Hotspot + Sender)
   HttpServer? _server;
-  final List<WebSocket> _clients = [];
+  final List<WebSocket> _hotspotClients = [];
   String _hostIp = 'Mendeteksi IP...';
 
-  // Client (Penerima) state
-  WebSocket? _clientSocket;
+  // Shared WebSocket Client state (Mode Relay Sender/Receiver & Mode Hotspot Receiver)
+  WebSocket? _socket;
+  Timer? _keepaliveTimer;
   bool _isConnected = false;
   bool _isConnecting = false;
-  String _clientStatus = 'Belum terhubung';
+  String _statusText = 'Masukkan URL Relay & Kode Room';
+
   final TextEditingController _ipController = TextEditingController();
+  final TextEditingController _relayUrlController = TextEditingController();
+  final TextEditingController _roomController =
+      TextEditingController(text: '1234');
 
   @override
   void initState() {
     super.initState();
-    _initAudioAndServer();
+    _initAudio();
   }
 
-  Future<void> _initAudioAndServer() async {
+  Future<void> _initAudio() async {
     await _checkOrRequestMic();
     _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
       if (!_localPressed || _role != NodeRole.sender) return;
       if (event is Uint8List && event.isNotEmpty) {
-        for (final c in List<WebSocket>.from(_clients)) {
-          try {
-            c.add(event);
-          } catch (_) {}
-        }
+        _sendBinary(event);
       }
     });
-    await _startHostServer();
   }
 
   Future<bool> _checkOrRequestMic() async {
@@ -143,12 +147,43 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   @override
   void dispose() {
     _micSub?.cancel();
+    _keepaliveTimer?.cancel();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     _stopHostServer();
-    _disconnectClient();
+    _disconnectSocket();
     _ipController.dispose();
+    _relayUrlController.dispose();
+    _roomController.dispose();
     super.dispose();
+  }
+
+  void _sendText(String text) {
+    if (_netMode == NetMode.hotspot && _role == NodeRole.sender) {
+      for (final c in List<WebSocket>.from(_hotspotClients)) {
+        try {
+          c.add(text);
+        } catch (_) {}
+      }
+    } else if (_netMode == NetMode.relay && _isConnected && _socket != null) {
+      try {
+        _socket!.add(text);
+      } catch (_) {}
+    }
+  }
+
+  void _sendBinary(Uint8List bytes) {
+    if (_netMode == NetMode.hotspot && _role == NodeRole.sender) {
+      for (final c in List<WebSocket>.from(_hotspotClients)) {
+        try {
+          c.add(bytes);
+        } catch (_) {}
+      }
+    } else if (_netMode == NetMode.relay && _isConnected && _socket != null) {
+      try {
+        _socket!.add(bytes);
+      } catch (_) {}
+    }
   }
 
   Future<String> _detectLocalIp() async {
@@ -190,15 +225,15 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             await ws.close();
             return;
           }
-          setState(() => _clients.add(ws));
+          setState(() => _hotspotClients.add(ws));
           ws.add(jsonEncode({'pressed': _localPressed}));
           ws.listen(
             (_) {},
             onDone: () {
-              if (mounted) setState(() => _clients.remove(ws));
+              if (mounted) setState(() => _hotspotClients.remove(ws));
             },
             onError: (_) {
-              if (mounted) setState(() => _clients.remove(ws));
+              if (mounted) setState(() => _hotspotClients.remove(ws));
             },
           );
         } else {
@@ -213,10 +248,10 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Future<void> _stopHostServer() async {
-    for (final c in List<WebSocket>.from(_clients)) {
+    for (final c in List<WebSocket>.from(_hotspotClients)) {
       await c.close().catchError((_) {});
     }
-    _clients.clear();
+    _hotspotClients.clear();
     await _server?.close(force: true);
     _server = null;
   }
@@ -232,37 +267,85 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
   }
 
-  Future<void> _connectToHost() async {
-    var raw = _ipController.text.trim();
-    if (raw.isEmpty) return;
-    raw = raw.replaceFirst(RegExp(r'^wss?://'), '');
-    final wsUrl =
-        raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
-    await _disconnectClient();
+  String? _buildWsTargetUrl() {
+    if (_netMode == NetMode.hotspot) {
+      var raw = _ipController.text.trim();
+      if (raw.isEmpty) return null;
+      raw = raw.replaceFirst(RegExp(r'^wss?://'), '');
+      return raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
+    } else {
+      var raw = _relayUrlController.text.trim();
+      final room = Uri.encodeComponent(
+        _roomController.text.trim().isEmpty
+            ? 'default'
+            : _roomController.text.trim(),
+      );
+      if (raw.isEmpty) return null;
+      if (raw.startsWith('https://')) {
+        raw = raw.replaceFirst('https://', 'wss://');
+      } else if (raw.startsWith('http://')) {
+        raw = raw.replaceFirst('http://', 'ws://');
+      } else if (!raw.startsWith('ws://') && !raw.startsWith('wss://')) {
+        raw = 'wss://$raw';
+      }
+      if (raw.endsWith('/')) {
+        raw = raw.substring(0, raw.length - 1);
+      }
+      final sep = raw.contains('?') ? '&' : '?';
+      return '$raw${sep}room=$room';
+    }
+  }
+
+  Future<void> _connectSocket() async {
+    final wsUrl = _buildWsTargetUrl();
+    if (wsUrl == null) {
+      setState(() {
+        _statusText = _netMode == NetMode.relay
+            ? 'Isi URL Relay terlebih dahulu'
+            : 'Isi IP Pengirim terlebih dahulu';
+      });
+      return;
+    }
+
+    await _disconnectSocket();
     if (!mounted) return;
     setState(() {
       _isConnecting = true;
-      _clientStatus = 'Menghubungkan ke $wsUrl...';
+      _statusText = 'Menghubungkan...';
     });
 
     try {
       final ws = await WebSocket.connect(wsUrl)
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 7));
       if (!mounted) {
         await ws.close();
         return;
       }
-      _clientSocket = ws;
+      _socket = ws;
+      _keepaliveTimer?.cancel();
+      _keepaliveTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+        if (_isConnected && _socket != null) {
+          try {
+            _socket!.add('{"ping":1}');
+          } catch (_) {}
+        }
+      });
+
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _clientStatus = 'Terhubung ke $raw (Siap menerima suara)';
+        _statusText = _netMode == NetMode.relay
+            ? 'Terhubung ke Room "${_roomController.text.trim()}"'
+            : 'Terhubung ke Hotspot Host';
       });
+
       ws.listen(
         (data) {
+          if (_role != NodeRole.receiver) return;
           if (data is String) {
             try {
               final map = jsonDecode(data) as Map<String, dynamic>;
+              if (!map.containsKey('pressed')) return;
               final pressed = map['pressed'] == true;
               if (mounted && _remotePressed != pressed) {
                 setState(() => _remotePressed = pressed);
@@ -282,22 +365,24 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           }
         },
         onDone: () {
+          _keepaliveTimer?.cancel();
           _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
           if (mounted) {
             setState(() {
               _isConnected = false;
               _remotePressed = false;
-              _clientStatus = 'Terputus dari host';
+              _statusText = 'Koneksi terputus';
             });
           }
         },
         onError: (_) {
+          _keepaliveTimer?.cancel();
           _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
           if (mounted) {
             setState(() {
               _isConnected = false;
               _remotePressed = false;
-              _clientStatus = 'Koneksi error';
+              _statusText = 'Koneksi gagal / error';
             });
           }
         },
@@ -307,16 +392,18 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         setState(() {
           _isConnected = false;
           _isConnecting = false;
-          _clientStatus = 'Gagal konek ke $raw';
+          _statusText = 'Gagal terhubung (cek URL/jaringan)';
         });
       }
     }
   }
 
-  Future<void> _disconnectClient() async {
+  Future<void> _disconnectSocket() async {
+    _keepaliveTimer?.cancel();
+    _keepaliveTimer = null;
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    await _clientSocket?.close().catchError((_) {});
-    _clientSocket = null;
+    await _socket?.close().catchError((_) {});
+    _socket = null;
     if (mounted) {
       setState(() {
         _isConnected = false;
@@ -326,7 +413,29 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
   }
 
-  void _switchRole(NodeRole next) async {
+  Future<void> _switchNetMode(NetMode next) async {
+    if (_netMode == next) return;
+    await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
+    await _disconnectSocket();
+    await _stopHostServer();
+    setState(() {
+      _netMode = next;
+      _localPressed = false;
+      _remotePressed = false;
+      _statusText = next == NetMode.relay
+          ? 'Masukkan URL Relay & Kode Room'
+          : 'Mode Hotspot Lokal siap';
+    });
+    if (next == NetMode.hotspot) {
+      if (_role == NodeRole.sender) {
+        await _startHostServer();
+      } else {
+        await _prefillGatewayIp();
+      }
+    }
+  }
+
+  Future<void> _switchRole(NodeRole next) async {
     if (_role == next) return;
     await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
@@ -335,13 +444,17 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _localPressed = false;
       _remotePressed = false;
     });
-    if (next == NodeRole.sender) {
-      await _disconnectClient();
+    if (_netMode == NetMode.hotspot) {
+      if (next == NodeRole.sender) {
+        await _disconnectSocket();
+        await _checkOrRequestMic();
+        await _startHostServer();
+      } else {
+        await _stopHostServer();
+        await _prefillGatewayIp();
+      }
+    } else if (next == NodeRole.sender) {
       await _checkOrRequestMic();
-      await _startHostServer();
-    } else {
-      await _stopHostServer();
-      await _prefillGatewayIp();
     }
   }
 
@@ -352,12 +465,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
     if (_localPressed != pressed) {
       setState(() => _localPressed = pressed);
-      final payload = jsonEncode({'pressed': pressed});
-      for (final c in List<WebSocket>.from(_clients)) {
-        try {
-          c.add(payload);
-        } catch (_) {}
-      }
+      _sendText(jsonEncode({'pressed': pressed}));
       if (pressed) {
         _audioChannel.invokeMethod('startCapture').catchError((_) {});
       } else {
@@ -378,7 +486,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 480),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 20, 24, 48),
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 crossAxisAlignment: CrossAxisAlignment.center,
@@ -431,7 +539,27 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             children: [
               Expanded(
                 child: _RoleChip(
-                  label: 'HP 1: Pengirim (Host)',
+                  label: 'Internet (Kode Room)',
+                  selected: _netMode == NetMode.relay,
+                  onTap: () => _switchNetMode(NetMode.relay),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _RoleChip(
+                  label: 'Hotspot Lokal',
+                  selected: _netMode == NetMode.hotspot,
+                  onTap: () => _switchNetMode(NetMode.hotspot),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _RoleChip(
+                  label: 'HP 1: Pengirim',
                   selected: _role == NodeRole.sender,
                   onTap: () => _switchRole(NodeRole.sender),
                 ),
@@ -439,7 +567,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: _RoleChip(
-                  label: 'HP 2: Penerima (Client)',
+                  label: 'HP 2: Penerima',
                   selected: _role == NodeRole.receiver,
                   onTap: () => _switchRole(NodeRole.receiver),
                 ),
@@ -447,12 +575,111 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          if (_role == NodeRole.sender)
+          if (_netMode == NetMode.relay) ...[
+            SizedBox(
+              height: 36,
+              child: TextField(
+                controller: _relayUrlController,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: const TextStyle(fontSize: 12),
+                decoration: InputDecoration(
+                  hintText: 'URL Relay (mis. https://relay-anda.deno.dev)',
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  filled: true,
+                  fillColor: AppTokens.inkLight,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 36,
+                    child: TextField(
+                      controller: _roomController,
+                      keyboardType: TextInputType.text,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: 'Kode Room (mis. 1234)',
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                        filled: true,
+                        fillColor: AppTokens.inkLight,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  height: 36,
+                  child: ElevatedButton(
+                    onPressed: _isConnecting
+                        ? null
+                        : (_isConnected ? _disconnectSocket : _connectSocket),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isConnected
+                          ? AppTokens.bgPrimaryPressed
+                          : AppTokens.bgPrimaryBtn,
+                      foregroundColor: AppTokens.inkLight,
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    child: Text(
+                      _isConnecting
+                          ? '...'
+                          : (_isConnected ? 'Putus' : 'Sambung'),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    _statusText,
+                    overflow: TextOverflow.ellipsis,
+                    style:
+                        const TextStyle(fontSize: 11, color: AppTokens.inkMuted),
+                  ),
+                ),
+                if (_role == NodeRole.sender)
+                  Text(
+                    'Mic: ${_micGranted ? "Aktif" : "Belum"}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppTokens.inkDark,
+                    ),
+                  ),
+              ],
+            ),
+          ] else if (_role == NodeRole.sender)
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'IP: $_hostIp:${AppTokens.wsPort} • Mic: ${_micGranted ? "Aktif" : "Belum izin"}',
+                  'IP: $_hostIp:${AppTokens.wsPort} • Mic: ${_micGranted ? "Aktif" : "Belum"}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
@@ -460,7 +687,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   ),
                 ),
                 Text(
-                  '${_clients.length} terhubung',
+                  '${_hotspotClients.length} terhubung',
                   style: const TextStyle(
                     fontSize: 11,
                     color: AppTokens.inkMuted,
@@ -468,7 +695,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                 ),
               ],
             )
-          else
+          else ...[
             Row(
               children: [
                 Expanded(
@@ -502,7 +729,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   child: ElevatedButton(
                     onPressed: _isConnecting
                         ? null
-                        : (_isConnected ? _disconnectClient : _connectToHost),
+                        : (_isConnected ? _disconnectSocket : _connectSocket),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _isConnected
                           ? AppTokens.bgPrimaryPressed
@@ -523,12 +750,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                 ),
               ],
             ),
-          if (_role == NodeRole.receiver) ...[
             const SizedBox(height: 6),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                _clientStatus,
+                _statusText,
                 style: const TextStyle(fontSize: 11, color: AppTokens.inkMuted),
               ),
             ),
