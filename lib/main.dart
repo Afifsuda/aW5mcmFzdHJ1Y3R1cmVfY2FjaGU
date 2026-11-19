@@ -221,8 +221,32 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     });
 
     try {
-      final ws =
-          await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 8);
+      client.connectionFactory =
+          (Uri uri, String? proxyHost, int? proxyPort) async {
+        final port = (uri.hasPort && uri.port != 0)
+            ? uri.port
+            : ((uri.scheme == 'https' || uri.scheme == 'wss') ? 443 : 80);
+        final addrs = await InternetAddress.lookup(
+          uri.host,
+          type: InternetAddressType.IPv4,
+        );
+        final ip = addrs.first;
+        if (uri.scheme == 'https' || uri.scheme == 'wss') {
+          final task = await Socket.startConnect(ip, port);
+          return ConnectionTask.fromSocket(
+            task.socket.then(
+              (raw) => SecureSocket.secure(raw, host: uri.host),
+            ),
+            task.cancel,
+          );
+        }
+        return Socket.startConnect(ip, port);
+      };
+
+      final ws = await WebSocket.connect(wsUrl, customClient: client)
+          .timeout(const Duration(seconds: 8));
       if (!mounted) {
         await ws.close();
         return;
@@ -260,10 +284,10 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         onDone: () => _handleDrop(
           'Terputus (code ${ws.closeCode ?? "-"}), menyambung ulang...',
         ),
-        onError: (_) => _handleDrop('Koneksi error, menyambung ulang...'),
+        onError: (err) => _handleDrop('Error: $err'),
       );
-    } catch (_) {
-      _handleDrop('Gagal konek, mencoba ulang...');
+    } catch (e) {
+      _handleDrop('Gagal konek: $e');
     }
   }
 
