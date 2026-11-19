@@ -58,7 +58,7 @@ class FlutterNativeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Native UI Base',
+      title: 'Antigravity HT',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.light,
@@ -69,8 +69,6 @@ class FlutterNativeApp extends StatelessWidget {
     );
   }
 }
-
-enum NodeRole { sender, receiver }
 
 class VoiceNodeScreen extends StatefulWidget {
   const VoiceNodeScreen({super.key});
@@ -85,7 +83,6 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   static const EventChannel _audioStreamChannel =
       EventChannel('com.afifsuda.canvas/audio_stream');
 
-  NodeRole _role = NodeRole.sender;
   bool _localPressed = false;
   bool _remotePressed = false;
   bool _micGranted = false;
@@ -98,28 +95,39 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   bool _manualDisconnect = false;
   bool _isConnected = false;
   bool _isConnecting = false;
-  String _statusText = 'Siap • Tekan Sambung';
+  String _statusText = 'Menyiapkan koneksi...';
 
-  final TextEditingController _roomController =
-      TextEditingController(text: '1234');
+  final TextEditingController _roomController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _initAudioAndConnect();
+    _boot();
   }
 
-  Future<void> _initAudioAndConnect() async {
+  Future<void> _boot() async {
     await _checkOrRequestMic();
+
     _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
-      if (!_localPressed || _role != NodeRole.sender) return;
-      if (!_isConnected || _socket == null) return;
+      if (!_localPressed || !_isConnected || _socket == null) return;
       if (event is Uint8List && event.isNotEmpty) {
         try {
           _socket!.add(event);
         } catch (_) {}
       }
     });
+
+    try {
+      final savedRoom =
+          await _audioChannel.invokeMethod<String>('getSavedRoom') ?? '1234';
+      if (mounted) {
+        _roomController.text = savedRoom;
+      }
+    } catch (_) {
+      if (mounted) _roomController.text = '1234';
+    }
+
+    await _connectRelay();
   }
 
   Future<bool> _checkOrRequestMic() async {
@@ -145,6 +153,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _reconnectTimer?.cancel();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+    _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
     _disconnectSocket(manual: true);
     _roomController.dispose();
     super.dispose();
@@ -154,6 +163,13 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     final room = _roomController.text.trim().isEmpty
         ? '1234'
         : _roomController.text.trim();
+    if (_roomController.text.trim().isEmpty) {
+      _roomController.text = room;
+    }
+
+    // Simpan room terakhir
+    _audioChannel.invokeMethod('saveRoom', room).catchError((_) {});
+
     final wsUrl =
         '${AppTokens.relayBaseWsUrl}?room=${Uri.encodeComponent(room)}';
 
@@ -187,17 +203,17 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         }
       });
 
+      // Aktifkan Foreground Service agar tetap jalan saat layar mati
+      _audioChannel.invokeMethod('startKeepAlive', room).catchError((_) {});
+
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _statusText = _role == NodeRole.sender
-            ? 'Terhubung Room $room (Siap bicara)'
-            : 'Terhubung Room $room (Siap mendengar)';
+        _statusText = 'Terhubung Room $room (Siap 2 arah)';
       });
 
       ws.listen(
         (data) {
-          if (_role != NodeRole.receiver) return;
           if (data is String) {
             try {
               final map = jsonDecode(data) as Map<String, dynamic>;
@@ -206,13 +222,15 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               if (mounted && _remotePressed != pressed) {
                 setState(() => _remotePressed = pressed);
               }
-              if (pressed) {
+              if (pressed && !_localPressed) {
                 _audioChannel.invokeMethod('startPlayback').catchError((_) {});
-              } else {
+              } else if (!pressed) {
                 _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
               }
             } catch (_) {}
           } else if (data is List<int>) {
+            // Hindari echo jika kita sendiri sedang menekan tombol bicara
+            if (_localPressed) return;
             final bytes = data is Uint8List ? data : Uint8List.fromList(data);
             _audioChannel
                 .invokeMethod('writePlayback', bytes)
@@ -224,7 +242,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         ),
         onError: (_) => _handleDrop('Koneksi error, menyambung ulang...'),
       );
-    } catch (e) {
+    } catch (_) {
       _handleDrop('Gagal konek, mencoba ulang...');
     }
   }
@@ -262,6 +280,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     await _closeSocketOnly();
+    if (manual) {
+      _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
+    }
     if (mounted) {
       setState(() {
         _isConnected = false;
@@ -271,28 +292,6 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           _statusText = 'Terputus';
         }
       });
-    }
-  }
-
-  Future<void> _switchRole(NodeRole next) async {
-    if (_role == next) return;
-    await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
-    await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    setState(() {
-      _role = next;
-      _localPressed = false;
-      _remotePressed = false;
-      if (_isConnected) {
-        final room = _roomController.text.trim().isEmpty
-            ? '1234'
-            : _roomController.text.trim();
-        _statusText = next == NodeRole.sender
-            ? 'Terhubung Room $room (Siap bicara)'
-            : 'Terhubung Room $room (Siap mendengar)';
-      }
-    });
-    if (next == NodeRole.sender) {
-      await _checkOrRequestMic();
     }
   }
 
@@ -309,17 +308,17 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         } catch (_) {}
       }
       if (pressed) {
-        _audioChannel.invokeMethod('startCapture').catchError((_) {});
+        await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+        await _audioChannel.invokeMethod('startCapture').catchError((_) {});
       } else {
-        _audioChannel.invokeMethod('stopCapture').catchError((_) {});
+        await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
       }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool receiverActive =
-        _role == NodeRole.sender ? _localPressed : _remotePressed;
+    final bool receiverActive = _remotePressed || _localPressed;
 
     return Scaffold(
       backgroundColor: AppTokens.bgScaffold,
@@ -328,35 +327,35 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 480),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 44),
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 48),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   _buildConnectionBar(),
-                  _SecondaryReceiverNode(isActive: receiverActive),
-                  if (_role == NodeRole.sender)
-                    _PrimarySenderNode(
-                      isActive: _localPressed,
-                      onPointerDown: (event) {
-                        _activePointer = event.pointer;
-                        _setPressed(true);
-                      },
-                      onPointerUp: (event) {
-                        if (_activePointer == event.pointer) {
-                          _activePointer = null;
-                          _setPressed(false);
-                        }
-                      },
-                      onPointerCancel: (event) {
-                        if (_activePointer == event.pointer) {
-                          _activePointer = null;
-                          _setPressed(false);
-                        }
-                      },
-                    )
-                  else
-                    const SizedBox(height: 168),
+                  _SecondaryReceiverNode(
+                    isActive: receiverActive,
+                    label: _remotePressed ? 'Mendengar' : 'Penerima',
+                  ),
+                  _PrimarySenderNode(
+                    isActive: _localPressed,
+                    onPointerDown: (event) {
+                      _activePointer = event.pointer;
+                      _setPressed(true);
+                    },
+                    onPointerUp: (event) {
+                      if (_activePointer == event.pointer) {
+                        _activePointer = null;
+                        _setPressed(false);
+                      }
+                    },
+                    onPointerCancel: (event) {
+                      if (_activePointer == event.pointer) {
+                        _activePointer = null;
+                        _setPressed(false);
+                      }
+                    },
+                  ),
                 ],
               ),
             ),
@@ -380,28 +379,8 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           Row(
             children: [
               Expanded(
-                child: _RoleChip(
-                  label: 'HP 1: Pengirim',
-                  selected: _role == NodeRole.sender,
-                  onTap: () => _switchRole(NodeRole.sender),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _RoleChip(
-                  label: 'HP 2: Penerima',
-                  selected: _role == NodeRole.receiver,
-                  onTap: () => _switchRole(NodeRole.receiver),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
                 child: SizedBox(
-                  height: 36,
+                  height: 38,
                   child: TextField(
                     controller: _roomController,
                     keyboardType: TextInputType.text,
@@ -432,7 +411,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               ),
               const SizedBox(width: 8),
               SizedBox(
-                height: 36,
+                height: 38,
                 child: ElevatedButton(
                   onPressed: _isConnecting
                       ? null
@@ -473,14 +452,13 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   ),
                 ),
               ),
-              if (_role == NodeRole.sender)
-                Text(
-                  'Mic: ${_micGranted ? "Aktif" : "Belum"}',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: AppTokens.inkDark,
-                  ),
+              Text(
+                'Mic: ${_micGranted ? "Aktif" : "Belum"}',
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppTokens.inkDark,
                 ),
+              ),
             ],
           ),
         ],
@@ -489,47 +467,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 }
 
-class _RoleChip extends StatelessWidget {
-  const _RoleChip({
+class _SecondaryReceiverNode extends StatelessWidget {
+  const _SecondaryReceiverNode({
+    required this.isActive,
     required this.label,
-    required this.selected,
-    required this.onTap,
   });
 
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 140),
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
-        decoration: BoxDecoration(
-          color: selected ? AppTokens.bgPrimaryBtn : AppTokens.inkLight,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        alignment: Alignment.center,
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: selected ? AppTokens.inkLight : AppTokens.inkMuted,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SecondaryReceiverNode extends StatelessWidget {
-  const _SecondaryReceiverNode({required this.isActive});
-
   final bool isActive;
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -563,7 +508,7 @@ class _SecondaryReceiverNode extends StatelessWidget {
               fontWeight: FontWeight.w500,
               color: isActive ? AppTokens.inkLight : AppTokens.inkMuted,
             ),
-            child: const Text('Penerima'),
+            child: Text(label),
           ),
         ),
       ),
@@ -614,9 +559,9 @@ class _PrimarySenderNode extends StatelessWidget {
               ],
             ),
             alignment: Alignment.center,
-            child: const Text(
-              'Pengirim',
-              style: TextStyle(
+            child: Text(
+              isActive ? 'Bicara...' : 'Tahan Bicara',
+              style: const TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.w600,
                 letterSpacing: -0.16,

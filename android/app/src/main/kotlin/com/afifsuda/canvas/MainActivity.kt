@@ -1,12 +1,16 @@
 package com.afifsuda.canvas
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -20,7 +24,10 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val METHOD_CHANNEL = "com.afifsuda.canvas/audio"
         private const val EVENT_CHANNEL = "com.afifsuda.canvas/audio_stream"
+        private const val PREFS_NAME = "agy_prefs"
+        private const val KEY_ROOM = "last_room"
         private const val REQ_MIC_PERMISSION = 1001
+        private const val REQ_NOTIF_PERMISSION = 1002
         private const val SAMPLE_RATE = 16000
         private const val CHUNK_BYTES = 1280 // 40ms @ 16kHz 16-bit mono
     }
@@ -34,6 +41,8 @@ class MainActivity : FlutterActivity() {
     @Volatile
     private var isCapturing = false
     private var audioRecord: AudioRecord? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
     private var captureThread: Thread? = null
 
     private val playbackLock = Any()
@@ -56,6 +65,41 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "getSavedRoom" -> {
+                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        result.success(prefs.getString(KEY_ROOM, "1234") ?: "1234")
+                    }
+                    "saveRoom" -> {
+                        val room = (call.arguments as? String)?.trim()
+                        if (!room.isNullOrEmpty()) {
+                            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                .edit()
+                                .putString(KEY_ROOM, room)
+                                .apply()
+                        }
+                        result.success(true)
+                    }
+                    "startKeepAlive" -> {
+                        val room = (call.arguments as? String) ?: "1234"
+                        requestNotificationPermissionIfNeeded()
+                        val intent = Intent(this, KeepAliveService::class.java).apply {
+                            action = KeepAliveService.ACTION_START
+                            putExtra(KeepAliveService.EXTRA_ROOM, room)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                        result.success(true)
+                    }
+                    "stopKeepAlive" -> {
+                        val intent = Intent(this, KeepAliveService::class.java).apply {
+                            action = KeepAliveService.ACTION_STOP
+                        }
+                        startService(intent)
+                        result.success(true)
+                    }
                     "hasMicPermission" -> {
                         result.success(hasRecordAudioPermission())
                     }
@@ -103,6 +147,17 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQ_NOTIF_PERMISSION
+                )
+            }
+        }
     }
 
     private fun hasRecordAudioPermission(): Boolean {
@@ -159,6 +214,20 @@ class MainActivity : FlutterActivity() {
             return
         }
 
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (_: Throwable) {
+        }
+
         audioRecord = record
         isCapturing = true
         record.startRecording()
@@ -188,6 +257,16 @@ class MainActivity : FlutterActivity() {
         } catch (_: InterruptedException) {
         }
         captureThread = null
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Throwable) {
+        }
+        noiseSuppressor = null
+        try {
+            echoCanceler?.release()
+        } catch (_: Throwable) {
+        }
+        echoCanceler = null
         try {
             audioRecord?.stop()
         } catch (_: Throwable) {
