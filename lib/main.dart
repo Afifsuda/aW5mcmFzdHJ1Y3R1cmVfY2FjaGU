@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -49,7 +50,7 @@ abstract final class AppTokens {
 
   static const Curve easeCurve = Cubic(0.2, 0.0, 0.0, 1.0);
   static const String relayBaseWsUrl =
-      'wss://aw5mcmfzdhj1y3r1cmvfy2fjagu.sudaapip.workers.dev';
+      'wss://aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev';
 }
 
 class FlutterNativeApp extends StatelessWidget {
@@ -58,7 +59,7 @@ class FlutterNativeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Antigravity HT',
+      title: 'Antigravity HT & Video',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.light,
@@ -69,6 +70,8 @@ class FlutterNativeApp extends StatelessWidget {
     );
   }
 }
+
+enum AppMode { voice, video }
 
 class VoiceNodeScreen extends StatefulWidget {
   const VoiceNodeScreen({super.key});
@@ -83,12 +86,16 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   static const EventChannel _audioStreamChannel =
       EventChannel('com.afifsuda.canvas/audio_stream');
 
+  AppMode _mode = AppMode.voice;
+
+  // HT Suara state
   bool _localPressed = false;
   bool _remotePressed = false;
   bool _micGranted = false;
   int? _activePointer;
   StreamSubscription<dynamic>? _micSub;
 
+  // WebSocket state (HT Suara + WebRTC Signaling)
   WebSocket? _socket;
   Timer? _keepaliveTimer;
   Timer? _reconnectTimer;
@@ -96,8 +103,21 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   bool _isConnected = false;
   bool _isConnecting = false;
   String _statusText = 'Menyiapkan koneksi...';
-
   final TextEditingController _roomController = TextEditingController();
+
+  // WebRTC Video Call state
+  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+  bool _renderersReady = false;
+  RTCPeerConnection? _peerConnection;
+  MediaStream? _localStream;
+  final List<RTCIceCandidate> _pendingCandidates = [];
+  bool _remoteDescSet = false;
+  bool _inCall = false;
+  bool _callBusy = false;
+  bool _micMuted = false;
+  bool _camOff = false;
+  String _callStatus = 'Siap Video Call';
 
   @override
   void initState() {
@@ -106,9 +126,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Future<void> _boot() async {
+    await _localRenderer.initialize();
+    await _remoteRenderer.initialize();
+    if (mounted) setState(() => _renderersReady = true);
+
     await _checkOrRequestMic();
 
     _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
+      if (_mode != AppMode.voice || _inCall) return;
       if (!_localPressed || !_isConnected || _socket == null) return;
       if (event is Uint8List && event.isNotEmpty) {
         try {
@@ -151,12 +176,23 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _micSub?.cancel();
     _keepaliveTimer?.cancel();
     _reconnectTimer?.cancel();
+    _hangupCall(notifyPeer: false);
+    _localRenderer.dispose();
+    _remoteRenderer.dispose();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
     _disconnectSocket(manual: true);
     _roomController.dispose();
     super.dispose();
+  }
+
+  void _sendJson(Map<String, dynamic> data) {
+    if (_isConnected && _socket != null) {
+      try {
+        _socket!.add(jsonEncode(data));
+      } catch (_) {}
+    }
   }
 
   Future<void> _connectRelay({bool isRetry = false}) async {
@@ -167,9 +203,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _roomController.text = room;
     }
 
-    // Simpan room terakhir
     _audioChannel.invokeMethod('saveRoom', room).catchError((_) {});
-
     final wsUrl =
         '${AppTokens.relayBaseWsUrl}?room=${Uri.encodeComponent(room)}';
 
@@ -203,34 +237,20 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         }
       });
 
-      // Aktifkan Foreground Service agar tetap jalan saat layar mati
       _audioChannel.invokeMethod('startKeepAlive', room).catchError((_) {});
 
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _statusText = 'Terhubung Room $room (Siap 2 arah)';
+        _statusText = 'Terhubung Room $room';
       });
 
       ws.listen(
         (data) {
           if (data is String) {
-            try {
-              final map = jsonDecode(data) as Map<String, dynamic>;
-              if (!map.containsKey('pressed')) return;
-              final pressed = map['pressed'] == true;
-              if (mounted && _remotePressed != pressed) {
-                setState(() => _remotePressed = pressed);
-              }
-              if (pressed && !_localPressed) {
-                _audioChannel.invokeMethod('startPlayback').catchError((_) {});
-              } else if (!pressed) {
-                _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-              }
-            } catch (_) {}
+            _handleIncomingText(data);
           } else if (data is List<int>) {
-            // Hindari echo jika kita sendiri sedang menekan tombol bicara
-            if (_localPressed) return;
+            if (_mode != AppMode.voice || _inCall || _localPressed) return;
             final bytes = data is Uint8List ? data : Uint8List.fromList(data);
             _audioChannel
                 .invokeMethod('writePlayback', bytes)
@@ -246,6 +266,311 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _handleDrop('Gagal konek, mencoba ulang...');
     }
   }
+
+  void _handleIncomingText(String raw) {
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      if (map.containsKey('webrtc')) {
+        _handleWebRtcSignal(map);
+        return;
+      }
+      if (map.containsKey('pressed')) {
+        if (_mode != AppMode.voice || _inCall) return;
+        final pressed = map['pressed'] == true;
+        if (mounted && _remotePressed != pressed) {
+          setState(() => _remotePressed = pressed);
+        }
+        if (pressed && !_localPressed) {
+          _audioChannel.invokeMethod('startPlayback').catchError((_) {});
+        } else if (!pressed) {
+          _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+        }
+      }
+    } catch (_) {}
+  }
+
+  // ==========================================================
+  // WEBRTC VIDEO CALL LOGIC
+  // ==========================================================
+
+  Future<RTCPeerConnection> _createRtcConnection() async {
+    final config = {
+      'iceServers': [
+        {'urls': 'stun:stun.l.google.com:19302'},
+        {'urls': 'stun:stun1.l.google.com:19302'},
+        {'urls': 'stun:stun.cloudflare.com:3478'},
+      ],
+      'sdpSemantics': 'unified-plan',
+    };
+
+    final pc = await createPeerConnection(config);
+    _pendingCandidates.clear();
+    _remoteDescSet = false;
+
+    pc.onIceCandidate = (RTCIceCandidate candidate) {
+      if (candidate.candidate != null) {
+        _sendJson({
+          'webrtc': 'ice',
+          'candidate': {
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          },
+        });
+      }
+    };
+
+    pc.onTrack = (RTCTrackEvent event) {
+      if (event.streams.isNotEmpty && mounted) {
+        setState(() {
+          _remoteRenderer.srcObject = event.streams[0];
+          _callStatus = 'Video Call Tersambung';
+        });
+      }
+    };
+
+    pc.onConnectionState = (RTCPeerConnectionState state) {
+      if (!mounted) return;
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        setState(() => _callStatus = 'Video Call Tersambung');
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        _hangupCall(notifyPeer: false);
+      }
+    };
+
+    return pc;
+  }
+
+  Future<void> _openLocalCameraAndMic() async {
+    await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
+    await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+
+    final stream = await navigator.mediaDevices.getUserMedia({
+      'audio': {
+        'echoCancellation': true,
+        'noiseSuppression': true,
+        'autoGainControl': true,
+      },
+      'video': {
+        'facingMode': 'user',
+        'width': {'ideal': 640},
+        'height': {'ideal': 480},
+        'frameRate': {'ideal': 24},
+      },
+    });
+    _localStream = stream;
+    if (mounted) {
+      setState(() {
+        _localRenderer.srcObject = stream;
+        _micMuted = false;
+        _camOff = false;
+      });
+    }
+  }
+
+  Future<void> _startVideoCall() async {
+    if (!_isConnected || _inCall || _callBusy) return;
+    setState(() {
+      _callBusy = true;
+      _callStatus = 'Membuka kamera & memanggil...';
+    });
+
+    try {
+      await _openLocalCameraAndMic();
+      final pc = await _createRtcConnection();
+      _peerConnection = pc;
+
+      for (final track in _localStream!.getTracks()) {
+        await pc.addTrack(track, _localStream!);
+      }
+
+      final offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      _sendJson({
+        'webrtc': 'offer',
+        'sdp': offer.sdp,
+        'type': offer.type,
+      });
+
+      if (mounted) {
+        setState(() {
+          _inCall = true;
+          _callBusy = false;
+          _callStatus = 'Memanggil lawan bicara...';
+        });
+      }
+    } catch (e) {
+      await _hangupCall(notifyPeer: false);
+      if (mounted) {
+        setState(() {
+          _callBusy = false;
+          _callStatus = 'Gagal mulai video: $e';
+        });
+      }
+    }
+  }
+
+  Future<void> _handleWebRtcSignal(Map<String, dynamic> map) async {
+    final kind = map['webrtc'];
+    if (kind == 'offer') {
+      try {
+        await _hangupCall(notifyPeer: false);
+        if (mounted) {
+          setState(() {
+            _mode = AppMode.video;
+            _localPressed = false;
+            _remotePressed = false;
+            _callBusy = true;
+            _callStatus = 'Menerima panggilan video...';
+          });
+        }
+
+        await _openLocalCameraAndMic();
+        final pc = await _createRtcConnection();
+        _peerConnection = pc;
+
+        for (final track in _localStream!.getTracks()) {
+          await pc.addTrack(track, _localStream!);
+        }
+
+        await pc.setRemoteDescription(
+          RTCSessionDescription(map['sdp'] as String, map['type'] as String),
+        );
+        _remoteDescSet = true;
+        await _flushPendingCandidates();
+
+        final answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        _sendJson({
+          'webrtc': 'answer',
+          'sdp': answer.sdp,
+          'type': answer.type,
+        });
+
+        if (mounted) {
+          setState(() {
+            _inCall = true;
+            _callBusy = false;
+            _callStatus = 'Menyambungkan video...';
+          });
+        }
+      } catch (e) {
+        await _hangupCall(notifyPeer: false);
+        if (mounted) {
+          setState(() => _callStatus = 'Gagal jawab panggilan: $e');
+        }
+      }
+    } else if (kind == 'answer') {
+      final pc = _peerConnection;
+      if (pc == null) return;
+      try {
+        await pc.setRemoteDescription(
+          RTCSessionDescription(map['sdp'] as String, map['type'] as String),
+        );
+        _remoteDescSet = true;
+        await _flushPendingCandidates();
+      } catch (_) {}
+    } else if (kind == 'ice') {
+      final candMap = map['candidate'] as Map<String, dynamic>?;
+      if (candMap == null) return;
+      final candidate = RTCIceCandidate(
+        candMap['candidate'] as String?,
+        candMap['sdpMid'] as String?,
+        candMap['sdpMLineIndex'] as int?,
+      );
+      if (_remoteDescSet && _peerConnection != null) {
+        await _peerConnection!.addCandidate(candidate).catchError((_) {});
+      } else {
+        _pendingCandidates.add(candidate);
+      }
+    } else if (kind == 'hangup') {
+      await _hangupCall(notifyPeer: false);
+      if (mounted) {
+        setState(() => _callStatus = 'Panggilan diakhiri lawan bicara');
+      }
+    }
+  }
+
+  Future<void> _flushPendingCandidates() async {
+    final pc = _peerConnection;
+    if (pc == null) return;
+    for (final c in List<RTCIceCandidate>.from(_pendingCandidates)) {
+      await pc.addCandidate(c).catchError((_) {});
+    }
+    _pendingCandidates.clear();
+  }
+
+  Future<void> _hangupCall({bool notifyPeer = true}) async {
+    if (notifyPeer) {
+      _sendJson({'webrtc': 'hangup'});
+    }
+    _pendingCandidates.clear();
+    _remoteDescSet = false;
+
+    try {
+      await _peerConnection?.close();
+      await _peerConnection?.dispose();
+    } catch (_) {}
+    _peerConnection = null;
+
+    try {
+      if (_localStream != null) {
+        for (final t in _localStream!.getTracks()) {
+          await t.stop();
+        }
+        await _localStream!.dispose();
+      }
+    } catch (_) {}
+    _localStream = null;
+
+    if (mounted) {
+      setState(() {
+        _localRenderer.srcObject = null;
+        _remoteRenderer.srcObject = null;
+        _inCall = false;
+        _callBusy = false;
+        _micMuted = false;
+        _camOff = false;
+        if (notifyPeer) _callStatus = 'Siap Video Call';
+      });
+    }
+  }
+
+  void _toggleMuteMic() {
+    final stream = _localStream;
+    if (stream == null) return;
+    final nextMuted = !_micMuted;
+    for (final track in stream.getAudioTracks()) {
+      track.enabled = !nextMuted;
+    }
+    setState(() => _micMuted = nextMuted);
+  }
+
+  void _toggleCamera() {
+    final stream = _localStream;
+    if (stream == null) return;
+    final nextOff = !_camOff;
+    for (final track in stream.getVideoTracks()) {
+      track.enabled = !nextOff;
+    }
+    setState(() => _camOff = nextOff);
+  }
+
+  Future<void> _switchCamera() async {
+    final stream = _localStream;
+    if (stream == null) return;
+    final videoTracks = stream.getVideoTracks();
+    if (videoTracks.isNotEmpty) {
+      await Helper.switchCamera(videoTracks.first);
+    }
+  }
+
+  // ==========================================================
+  // CONNECTION & HT CONTROLS
+  // ==========================================================
 
   void _handleDrop(String msg) {
     _keepaliveTimer?.cancel();
@@ -279,6 +604,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _manualDisconnect = manual;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    await _hangupCall(notifyPeer: true);
     await _closeSocketOnly();
     if (manual) {
       _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
@@ -295,18 +621,26 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
   }
 
+  Future<void> _switchMode(AppMode next) async {
+    if (_mode == next) return;
+    if (_localPressed) {
+      await _setPressed(false);
+    }
+    if (next == AppMode.voice && _inCall) {
+      await _hangupCall(notifyPeer: true);
+    }
+    setState(() => _mode = next);
+  }
+
   Future<void> _setPressed(bool pressed) async {
+    if (_mode != AppMode.voice || _inCall) return;
     if (pressed && !_micGranted) {
       final ok = await _checkOrRequestMic();
       if (!ok) return;
     }
     if (_localPressed != pressed) {
       setState(() => _localPressed = pressed);
-      if (_isConnected && _socket != null) {
-        try {
-          _socket!.add(jsonEncode({'pressed': pressed}));
-        } catch (_) {}
-      }
+      _sendJson({'pressed': pressed});
       if (pressed) {
         await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
         await _audioChannel.invokeMethod('startCapture').catchError((_) {});
@@ -327,35 +661,43 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 480),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 48),
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 28),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  _buildConnectionBar(),
-                  _SecondaryReceiverNode(
-                    isActive: receiverActive,
-                    label: _remotePressed ? 'Mendengar' : 'Penerima',
-                  ),
-                  _PrimarySenderNode(
-                    isActive: _localPressed,
-                    onPointerDown: (event) {
-                      _activePointer = event.pointer;
-                      _setPressed(true);
-                    },
-                    onPointerUp: (event) {
-                      if (_activePointer == event.pointer) {
-                        _activePointer = null;
-                        _setPressed(false);
-                      }
-                    },
-                    onPointerCancel: (event) {
-                      if (_activePointer == event.pointer) {
-                        _activePointer = null;
-                        _setPressed(false);
-                      }
-                    },
-                  ),
+                  _buildTopBar(),
+                  if (_mode == AppMode.voice) ...[
+                    _SecondaryReceiverNode(
+                      isActive: receiverActive,
+                      label: _remotePressed ? 'Mendengar' : 'Penerima',
+                    ),
+                    _PrimarySenderNode(
+                      isActive: _localPressed,
+                      onPointerDown: (event) {
+                        _activePointer = event.pointer;
+                        _setPressed(true);
+                      },
+                      onPointerUp: (event) {
+                        if (_activePointer == event.pointer) {
+                          _activePointer = null;
+                          _setPressed(false);
+                        }
+                      },
+                      onPointerCancel: (event) {
+                        if (_activePointer == event.pointer) {
+                          _activePointer = null;
+                          _setPressed(false);
+                        }
+                      },
+                    ),
+                  ] else
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: _buildVideoArea(),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -365,7 +707,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     );
   }
 
-  Widget _buildConnectionBar() {
+  Widget _buildTopBar() {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -379,8 +721,28 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           Row(
             children: [
               Expanded(
+                child: _ModeChip(
+                  label: 'HT Suara',
+                  selected: _mode == AppMode.voice,
+                  onTap: () => _switchMode(AppMode.voice),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _ModeChip(
+                  label: 'Video Call',
+                  selected: _mode == AppMode.video,
+                  onTap: () => _switchMode(AppMode.video),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
                 child: SizedBox(
-                  height: 38,
+                  height: 36,
                   child: TextField(
                     controller: _roomController,
                     keyboardType: TextInputType.text,
@@ -411,7 +773,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               ),
               const SizedBox(width: 8),
               SizedBox(
-                height: 38,
+                height: 36,
                 child: ElevatedButton(
                   onPressed: _isConnecting
                       ? null
@@ -462,6 +824,198 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildVideoArea() {
+    return Column(
+      children: [
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              width: double.infinity,
+              color: AppTokens.bgPrimaryBtn,
+              child: Stack(
+                children: [
+                  if (_renderersReady && _remoteRenderer.srcObject != null)
+                    RTCVideoView(
+                      _remoteRenderer,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    )
+                  else
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(
+                          _callStatus,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: AppTokens.inkLight,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (_renderersReady && _localRenderer.srcObject != null)
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      width: 100,
+                      height: 144,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: Colors.white24,
+                              width: 1.5,
+                            ),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: RTCVideoView(
+                            _localRenderer,
+                            mirror: true,
+                            objectFit: RTCVideoViewObjectFit
+                                .RTCVideoViewObjectFitCover,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        if (!_inCall)
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed: (!_isConnected || _callBusy) ? null : _startVideoCall,
+              icon: const Icon(Icons.videocam_rounded, size: 20),
+              label: Text(
+                _callBusy ? 'Menyiapkan...' : 'Mulai Video Call',
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTokens.bgPrimaryBtn,
+                foregroundColor: AppTokens.inkLight,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          )
+        else
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _VideoCtrlBtn(
+                icon: _micMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                active: _micMuted,
+                onTap: _toggleMuteMic,
+              ),
+              _VideoCtrlBtn(
+                icon: _camOff
+                    ? Icons.videocam_off_rounded
+                    : Icons.videocam_rounded,
+                active: _camOff,
+                onTap: _toggleCamera,
+              ),
+              _VideoCtrlBtn(
+                icon: Icons.cameraswitch_rounded,
+                active: false,
+                onTap: _switchCamera,
+              ),
+              _VideoCtrlBtn(
+                icon: Icons.call_end_rounded,
+                active: true,
+                danger: true,
+                onTap: () => _hangupCall(notifyPeer: true),
+              ),
+            ],
+          ),
+      ],
+    );
+  }
+}
+
+class _ModeChip extends StatelessWidget {
+  const _ModeChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        decoration: BoxDecoration(
+          color: selected ? AppTokens.bgPrimaryBtn : AppTokens.inkLight,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: selected ? AppTokens.inkLight : AppTokens.inkMuted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VideoCtrlBtn extends StatelessWidget {
+  const _VideoCtrlBtn({
+    required this.icon,
+    required this.active,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  final IconData icon;
+  final bool active;
+  final bool danger;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = danger
+        ? AppTokens.bgPrimaryPressed
+        : (active ? AppTokens.bgPrimaryBtn : AppTokens.bgSecondaryIdle);
+    final fg = (danger || active) ? AppTokens.inkLight : AppTokens.inkDark;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 54,
+        height: 54,
+        decoration: BoxDecoration(
+          color: bg,
+          shape: BoxShape.circle,
+          border: Border.all(color: AppTokens.borderSubtle),
+        ),
+        child: Icon(icon, color: fg, size: 24),
       ),
     );
   }

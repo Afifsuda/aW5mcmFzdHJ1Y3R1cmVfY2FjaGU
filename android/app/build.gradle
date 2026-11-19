@@ -50,7 +50,7 @@ android {
 
     defaultConfig {
         applicationId "com.afifsuda.canvas"
-        minSdkVersion flutter.minSdkVersion
+        minSdkVersion 24
         targetSdkVersion 35
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
@@ -72,7 +72,7 @@ android {
             signingConfig keystorePropertiesFile.exists() ? signingConfigs.release : signingConfigs.debug
             minifyEnabled true
             shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 
