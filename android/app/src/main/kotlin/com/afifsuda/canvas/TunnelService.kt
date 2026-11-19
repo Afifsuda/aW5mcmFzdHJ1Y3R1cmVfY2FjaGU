@@ -176,9 +176,8 @@ class TunnelService : Service() {
             readerThread = Thread {
                 try {
                     BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                        var line: String?
-                        while (!stopping && reader.readLine().also { line = it } != null) {
-                            val text = line ?: continue
+                        while (!stopping) {
+                            val text = reader.readLine() ?: break
                             val match = TRYCLOUDFLARE_REGEX.find(text)
                             if (match != null) {
                                 val foundUrl = match.value
