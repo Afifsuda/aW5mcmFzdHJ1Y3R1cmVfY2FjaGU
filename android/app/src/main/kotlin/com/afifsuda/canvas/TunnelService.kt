@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -62,6 +63,7 @@ class TunnelService : Service() {
     private var process: Process? = null
     private var readerThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     @Volatile
     private var stopping = false
@@ -169,6 +171,7 @@ class TunnelService : Service() {
                 bin.absolutePath,
                 "tunnel",
                 "--no-autoupdate",
+                "--ha-connections", "1",
                 "--protocol", "http2",
                 "--url", "http://127.0.0.1:8765"
             )
@@ -188,6 +191,8 @@ class TunnelService : Service() {
 
             readerThread = Thread {
                 var lastLine = ""
+                var foundUrl: String? = null
+                var registered = false
                 try {
                     BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                         while (!stopping) {
@@ -196,10 +201,23 @@ class TunnelService : Service() {
                                 lastLine = text.trim()
                             }
                             val match = TRYCLOUDFLARE_REGEX.find(text)
-                            if (match != null) {
-                                val foundUrl = match.value
-                                TunnelBus.emit("running", foundUrl, "Tunnel aktif")
-                                updateNotification("Aktif: $foundUrl")
+                            if (match != null && foundUrl == null) {
+                                foundUrl = match.value
+                                TunnelBus.emit(
+                                    "starting",
+                                    foundUrl,
+                                    "Link dibuat, menunggu edge Cloudflare..."
+                                )
+                                updateNotification("Menghubungkan: $foundUrl")
+                            }
+                            if (!registered && text.contains("Registered tunnel connection")) {
+                                registered = true
+                                TunnelBus.emit(
+                                    "running",
+                                    foundUrl,
+                                    "Tunnel aktif & siap!"
+                                )
+                                updateNotification("Aktif: ${foundUrl ?: "Tunnel siap"}")
                             }
                         }
                     }
@@ -256,6 +274,17 @@ class TunnelService : Service() {
             if (wakeLock?.isHeld == false) {
                 wakeLock?.acquire(6 * 60 * 60 * 1000L)
             }
+            if (wifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                wifiLock = wm.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "AntigravityCanvas::TunnelWifiLock"
+                )
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
         } catch (_: Throwable) {
         }
     }
@@ -264,6 +293,9 @@ class TunnelService : Service() {
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
+            }
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
             }
         } catch (_: Throwable) {
         }

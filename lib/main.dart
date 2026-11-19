@@ -587,14 +587,16 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                _tunnelUrl ?? _tunnelMessage,
+                _tunnelUrl != null
+                    ? '$_tunnelMessage • $_tunnelUrl'
+                    : _tunnelMessage,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight:
                       _tunnelUrl != null ? FontWeight.w600 : FontWeight.w400,
-                  color: _tunnelUrl != null
+                  color: _tunnelStatus == 'running'
                       ? AppTokens.inkDark
                       : AppTokens.inkMuted,
                 ),
