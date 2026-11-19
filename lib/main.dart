@@ -111,6 +111,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   bool _renderersReady = false;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+  MediaStream? _remoteStream;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescSet = false;
   bool _inCall = false;
@@ -379,10 +380,34 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       }
     };
 
-    pc.onTrack = (RTCTrackEvent event) {
-      if (event.streams.isNotEmpty && mounted) {
+    pc.onTrack = (RTCTrackEvent event) async {
+      event.track.enabled = true;
+      if (event.streams.isNotEmpty) {
+        _remoteStream = event.streams[0];
+        if (mounted) {
+          setState(() {
+            _remoteRenderer.srcObject = _remoteStream;
+            _callStatus = 'Video Call Tersambung';
+          });
+        }
+      } else {
+        _remoteStream ??= await createLocalMediaStream('remote_stream');
+        await _remoteStream!.addTrack(event.track);
+        if (mounted) {
+          setState(() {
+            _remoteRenderer.srcObject = null;
+            _remoteRenderer.srcObject = _remoteStream;
+            _callStatus = 'Video Call Tersambung';
+          });
+        }
+      }
+    };
+
+    pc.onAddStream = (MediaStream stream) {
+      _remoteStream = stream;
+      if (mounted) {
         setState(() {
-          _remoteRenderer.srcObject = event.streams[0];
+          _remoteRenderer.srcObject = stream;
           _callStatus = 'Video Call Tersambung';
         });
       }
@@ -419,6 +444,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       },
     });
     _localStream = stream;
+    await Helper.setSpeakerphoneOn(true).catchError((_) {});
     if (mounted) {
       setState(() {
         _localRenderer.srcObject = stream;
@@ -584,6 +610,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       }
     } catch (_) {}
     _localStream = null;
+
+    try {
+      await _remoteStream?.dispose();
+    } catch (_) {}
+    _remoteStream = null;
 
     if (mounted) {
       setState(() {
