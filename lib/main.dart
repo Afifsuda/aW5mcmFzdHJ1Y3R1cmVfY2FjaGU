@@ -195,6 +195,41 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
   }
 
+  Future<InternetAddress> _resolveIpv4ViaDoh(String host) async {
+    final endpoints = [
+      'https://1.1.1.1/dns-query?name=${Uri.encodeComponent(host)}&type=A',
+      'https://8.8.8.8/resolve?name=${Uri.encodeComponent(host)}&type=A',
+    ];
+    for (final url in endpoints) {
+      try {
+        final dohClient = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 4);
+        final req = await dohClient.getUrl(Uri.parse(url));
+        req.headers.set('accept', 'application/dns-json');
+        final res = await req.close().timeout(const Duration(seconds: 4));
+        final body = await res.transform(utf8.decoder).join();
+        dohClient.close(force: true);
+        final json = jsonDecode(body) as Map<String, dynamic>;
+        final answers = json['Answer'] as List<dynamic>?;
+        if (answers != null) {
+          for (final ans in answers) {
+            if (ans is Map && ans['type'] == 1 && ans['data'] is String) {
+              final ip = InternetAddress.tryParse(ans['data'] as String);
+              if (ip != null && ip.type == InternetAddressType.IPv4) {
+                return ip;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    final addrs = await InternetAddress.lookup(
+      host,
+      type: InternetAddressType.IPv4,
+    );
+    return addrs.first;
+  }
+
   Future<void> _connectRelay({bool isRetry = false}) async {
     final room = _roomController.text.trim().isEmpty
         ? '1234'
@@ -228,11 +263,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         final port = (uri.hasPort && uri.port != 0)
             ? uri.port
             : ((uri.scheme == 'https' || uri.scheme == 'wss') ? 443 : 80);
-        final addrs = await InternetAddress.lookup(
-          uri.host,
-          type: InternetAddressType.IPv4,
-        );
-        final ip = addrs.first;
+        final ip = await _resolveIpv4ViaDoh(uri.host);
         if (uri.scheme == 'https' || uri.scheme == 'wss') {
           final task = await Socket.startConnect(ip, port);
           return ConnectionTask.fromSocket(
