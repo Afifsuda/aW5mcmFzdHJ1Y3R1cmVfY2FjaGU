@@ -46,6 +46,15 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Download Bundled Cloudflared ARM64 Binary
+        if: steps.project_check.outputs.exists == 'true'
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" \
+            -o android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so
+          chmod 755 android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so
+          ls -lh android/app/src/main/jniLibs/arm64-v8a/libcloudflared.so
+
       - name: Decode Keystore & Configure Signing
         if: steps.project_check.outputs.exists == 'true'
         env:

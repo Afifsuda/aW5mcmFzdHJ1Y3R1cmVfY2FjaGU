@@ -71,8 +71,6 @@ class FlutterNativeApp extends StatelessWidget {
 
 enum NodeRole { sender, receiver }
 
-enum NetMode { relay, hotspot }
-
 class VoiceNodeScreen extends StatefulWidget {
   const VoiceNodeScreen({super.key});
 
@@ -85,47 +83,66 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       MethodChannel('com.afifsuda.canvas/audio');
   static const EventChannel _audioStreamChannel =
       EventChannel('com.afifsuda.canvas/audio_stream');
+  static const MethodChannel _tunnelChannel =
+      MethodChannel('com.afifsuda.canvas/tunnel');
+  static const EventChannel _tunnelEventChannel =
+      EventChannel('com.afifsuda.canvas/tunnel_events');
 
-  NetMode _netMode = NetMode.relay;
   NodeRole _role = NodeRole.sender;
-
   bool _localPressed = false;
   bool _remotePressed = false;
   bool _micGranted = false;
   int? _activePointer;
   StreamSubscription<dynamic>? _micSub;
+  StreamSubscription<dynamic>? _tunnelSub;
 
-  // Hotspot Host state (Mode Hotspot + Sender)
+  // Host (Pengirim) state
   HttpServer? _server;
-  final List<WebSocket> _hotspotClients = [];
+  final List<WebSocket> _clients = [];
   String _hostIp = 'Mendeteksi IP...';
+  String _tunnelStatus = 'stopped';
+  String? _tunnelUrl;
+  String _tunnelMessage = 'Tunnel nonaktif';
 
-  // Shared WebSocket Client state (Mode Relay Sender/Receiver & Mode Hotspot Receiver)
-  WebSocket? _socket;
+  // Client (Penerima) state
+  WebSocket? _clientSocket;
   Timer? _keepaliveTimer;
   bool _isConnected = false;
   bool _isConnecting = false;
-  String _statusText = 'Masukkan URL Relay & Kode Room';
-
-  final TextEditingController _ipController = TextEditingController();
-  final TextEditingController _relayUrlController = TextEditingController();
-  final TextEditingController _roomController =
-      TextEditingController(text: '1234');
+  String _clientStatus = 'Masukkan Link Tunnel atau IP Hotspot';
+  final TextEditingController _targetController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _initAudio();
+    _initAll();
   }
 
-  Future<void> _initAudio() async {
+  Future<void> _initAll() async {
     await _checkOrRequestMic();
+
     _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
       if (!_localPressed || _role != NodeRole.sender) return;
       if (event is Uint8List && event.isNotEmpty) {
-        _sendBinary(event);
+        for (final c in List<WebSocket>.from(_clients)) {
+          try {
+            c.add(event);
+          } catch (_) {}
+        }
       }
     });
+
+    _tunnelSub = _tunnelEventChannel.receiveBroadcastStream().listen((event) {
+      if (event is Map && mounted) {
+        setState(() {
+          _tunnelStatus = (event['status'] as String?) ?? 'stopped';
+          _tunnelUrl = event['url'] as String?;
+          _tunnelMessage = (event['message'] as String?) ?? '';
+        });
+      }
+    });
+
+    await _startHostServer();
   }
 
   Future<bool> _checkOrRequestMic() async {
@@ -147,43 +164,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   @override
   void dispose() {
     _micSub?.cancel();
+    _tunnelSub?.cancel();
     _keepaliveTimer?.cancel();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     _stopHostServer();
-    _disconnectSocket();
-    _ipController.dispose();
-    _relayUrlController.dispose();
-    _roomController.dispose();
+    _disconnectClient();
+    _targetController.dispose();
     super.dispose();
-  }
-
-  void _sendText(String text) {
-    if (_netMode == NetMode.hotspot && _role == NodeRole.sender) {
-      for (final c in List<WebSocket>.from(_hotspotClients)) {
-        try {
-          c.add(text);
-        } catch (_) {}
-      }
-    } else if (_netMode == NetMode.relay && _isConnected && _socket != null) {
-      try {
-        _socket!.add(text);
-      } catch (_) {}
-    }
-  }
-
-  void _sendBinary(Uint8List bytes) {
-    if (_netMode == NetMode.hotspot && _role == NodeRole.sender) {
-      for (final c in List<WebSocket>.from(_hotspotClients)) {
-        try {
-          c.add(bytes);
-        } catch (_) {}
-      }
-    } else if (_netMode == NetMode.relay && _isConnected && _socket != null) {
-      try {
-        _socket!.add(bytes);
-      } catch (_) {}
-    }
   }
 
   Future<String> _detectLocalIp() async {
@@ -225,20 +213,22 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             await ws.close();
             return;
           }
-          setState(() => _hotspotClients.add(ws));
+          setState(() => _clients.add(ws));
           ws.add(jsonEncode({'pressed': _localPressed}));
           ws.listen(
-            (_) {},
+            (data) {
+              // Abaikan ping keepalive dari client
+            },
             onDone: () {
-              if (mounted) setState(() => _hotspotClients.remove(ws));
+              if (mounted) setState(() => _clients.remove(ws));
             },
             onError: (_) {
-              if (mounted) setState(() => _hotspotClients.remove(ws));
+              if (mounted) setState(() => _clients.remove(ws));
             },
           );
         } else {
           req.response.statusCode = HttpStatus.ok;
-          req.response.write('Antigravity Hotspot WS Server');
+          req.response.write('Antigravity Bundled WS Server Ready');
           await req.response.close();
         }
       });
@@ -248,85 +238,78 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Future<void> _stopHostServer() async {
-    for (final c in List<WebSocket>.from(_hotspotClients)) {
+    for (final c in List<WebSocket>.from(_clients)) {
       await c.close().catchError((_) {});
     }
-    _hotspotClients.clear();
+    _clients.clear();
     await _server?.close(force: true);
     _server = null;
   }
 
-  Future<void> _prefillGatewayIp() async {
-    if (_ipController.text.isNotEmpty) return;
-    final myIp = await _detectLocalIp();
-    final parts = myIp.split('.');
-    if (parts.length == 4 && myIp != '127.0.0.1') {
-      _ipController.text = '${parts[0]}.${parts[1]}.${parts[2]}.1';
+  Future<void> _toggleTunnel() async {
+    if (_tunnelStatus == 'running' || _tunnelStatus == 'starting') {
+      await _tunnelChannel.invokeMethod('stopTunnel').catchError((_) {});
     } else {
-      _ipController.text = '192.168.43.1';
+      await _tunnelChannel.invokeMethod('startTunnel').catchError((_) {});
     }
   }
 
-  String? _buildWsTargetUrl() {
-    if (_netMode == NetMode.hotspot) {
-      var raw = _ipController.text.trim();
-      if (raw.isEmpty) return null;
-      raw = raw.replaceFirst(RegExp(r'^wss?://'), '');
-      return raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
-    } else {
-      var raw = _relayUrlController.text.trim();
-      final room = Uri.encodeComponent(
-        _roomController.text.trim().isEmpty
-            ? 'default'
-            : _roomController.text.trim(),
-      );
-      if (raw.isEmpty) return null;
-      if (raw.startsWith('https://')) {
-        raw = raw.replaceFirst('https://', 'wss://');
-      } else if (raw.startsWith('http://')) {
-        raw = raw.replaceFirst('http://', 'ws://');
-      } else if (!raw.startsWith('ws://') && !raw.startsWith('wss://')) {
-        raw = 'wss://$raw';
-      }
-      if (raw.endsWith('/')) {
-        raw = raw.substring(0, raw.length - 1);
-      }
-      final sep = raw.contains('?') ? '&' : '?';
-      return '$raw${sep}room=$room';
-    }
+  void _copyTunnelUrl() {
+    final url = _tunnelUrl;
+    if (url == null || url.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: url));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Link tunnel disalin! Kirim ke HP 2.'),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
-  Future<void> _connectSocket() async {
-    final wsUrl = _buildWsTargetUrl();
-    if (wsUrl == null) {
-      setState(() {
-        _statusText = _netMode == NetMode.relay
-            ? 'Isi URL Relay terlebih dahulu'
-            : 'Isi IP Pengirim terlebih dahulu';
-      });
-      return;
+  String? _normalizeTargetWsUrl(String input) {
+    var raw = input.trim();
+    if (raw.isEmpty) return null;
+    if (raw.endsWith('/')) {
+      raw = raw.substring(0, raw.length - 1);
     }
+    if (raw.startsWith('https://')) {
+      return raw.replaceFirst('https://', 'wss://');
+    }
+    if (raw.startsWith('http://')) {
+      return raw.replaceFirst('http://', 'ws://');
+    }
+    if (raw.startsWith('wss://') || raw.startsWith('ws://')) {
+      return raw;
+    }
+    if (raw.contains('trycloudflare.com')) {
+      return 'wss://$raw';
+    }
+    return raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
+  }
 
-    await _disconnectSocket();
+  Future<void> _connectToHost() async {
+    final wsUrl = _normalizeTargetWsUrl(_targetController.text);
+    if (wsUrl == null) return;
+    await _disconnectClient();
     if (!mounted) return;
     setState(() {
       _isConnecting = true;
-      _statusText = 'Menghubungkan...';
+      _clientStatus = 'Menghubungkan...';
     });
 
     try {
-      final ws = await WebSocket.connect(wsUrl)
-          .timeout(const Duration(seconds: 7));
+      final ws =
+          await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
       if (!mounted) {
         await ws.close();
         return;
       }
-      _socket = ws;
+      _clientSocket = ws;
       _keepaliveTimer?.cancel();
       _keepaliveTimer = Timer.periodic(const Duration(seconds: 20), (_) {
-        if (_isConnected && _socket != null) {
+        if (_isConnected && _socketAlive(ws)) {
           try {
-            _socket!.add('{"ping":1}');
+            ws.add('{"ping":1}');
           } catch (_) {}
         }
       });
@@ -334,14 +317,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _statusText = _netMode == NetMode.relay
-            ? 'Terhubung ke Room "${_roomController.text.trim()}"'
-            : 'Terhubung ke Hotspot Host';
+        _clientStatus = 'Terhubung (Siap menerima suara)';
       });
 
       ws.listen(
         (data) {
-          if (_role != NodeRole.receiver) return;
           if (data is String) {
             try {
               final map = jsonDecode(data) as Map<String, dynamic>;
@@ -357,8 +337,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               }
             } catch (_) {}
           } else if (data is List<int>) {
-            final bytes =
-                data is Uint8List ? data : Uint8List.fromList(data);
+            final bytes = data is Uint8List ? data : Uint8List.fromList(data);
             _audioChannel
                 .invokeMethod('writePlayback', bytes)
                 .catchError((_) {});
@@ -371,7 +350,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             setState(() {
               _isConnected = false;
               _remotePressed = false;
-              _statusText = 'Koneksi terputus';
+              _statusTextOnDisconnect();
             });
           }
         },
@@ -382,7 +361,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             setState(() {
               _isConnected = false;
               _remotePressed = false;
-              _statusText = 'Koneksi gagal / error';
+              _clientStatus = 'Koneksi error / gagal';
             });
           }
         },
@@ -392,18 +371,24 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         setState(() {
           _isConnected = false;
           _isConnecting = false;
-          _statusText = 'Gagal terhubung (cek URL/jaringan)';
+          _clientStatus = 'Gagal konek (cek link/IP & pastikan HP 1 aktif)';
         });
       }
     }
   }
 
-  Future<void> _disconnectSocket() async {
+  bool _socketAlive(WebSocket ws) => ws.readyState == WebSocket.open;
+
+  void _statusTextOnDisconnect() {
+    _clientStatus = 'Terputus dari host';
+  }
+
+  Future<void> _disconnectClient() async {
     _keepaliveTimer?.cancel();
     _keepaliveTimer = null;
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    await _socket?.close().catchError((_) {});
-    _socket = null;
+    await _clientSocket?.close().catchError((_) {});
+    _clientSocket = null;
     if (mounted) {
       setState(() {
         _isConnected = false;
@@ -413,29 +398,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
   }
 
-  Future<void> _switchNetMode(NetMode next) async {
-    if (_netMode == next) return;
-    await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
-    await _disconnectSocket();
-    await _stopHostServer();
-    setState(() {
-      _netMode = next;
-      _localPressed = false;
-      _remotePressed = false;
-      _statusText = next == NetMode.relay
-          ? 'Masukkan URL Relay & Kode Room'
-          : 'Mode Hotspot Lokal siap';
-    });
-    if (next == NetMode.hotspot) {
-      if (_role == NodeRole.sender) {
-        await _startHostServer();
-      } else {
-        await _prefillGatewayIp();
-      }
-    }
-  }
-
-  Future<void> _switchRole(NodeRole next) async {
+  void _switchRole(NodeRole next) async {
     if (_role == next) return;
     await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
@@ -444,17 +407,13 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _localPressed = false;
       _remotePressed = false;
     });
-    if (_netMode == NetMode.hotspot) {
-      if (next == NodeRole.sender) {
-        await _disconnectSocket();
-        await _checkOrRequestMic();
-        await _startHostServer();
-      } else {
-        await _stopHostServer();
-        await _prefillGatewayIp();
-      }
-    } else if (next == NodeRole.sender) {
+    if (next == NodeRole.sender) {
+      await _disconnectClient();
       await _checkOrRequestMic();
+      await _startHostServer();
+    } else {
+      await _tunnelChannel.invokeMethod('stopTunnel').catchError((_) {});
+      await _stopHostServer();
     }
   }
 
@@ -465,7 +424,12 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
     if (_localPressed != pressed) {
       setState(() => _localPressed = pressed);
-      _sendText(jsonEncode({'pressed': pressed}));
+      final payload = jsonEncode({'pressed': pressed});
+      for (final c in List<WebSocket>.from(_clients)) {
+        try {
+          c.add(payload);
+        } catch (_) {}
+      }
       if (pressed) {
         _audioChannel.invokeMethod('startCapture').catchError((_) {});
       } else {
@@ -525,6 +489,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Widget _buildConnectionBar() {
+    final bool tunnelBusy =
+        _tunnelStatus == 'starting' || _tunnelStatus == 'running';
+
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -539,27 +506,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             children: [
               Expanded(
                 child: _RoleChip(
-                  label: 'Internet (Kode Room)',
-                  selected: _netMode == NetMode.relay,
-                  onTap: () => _switchNetMode(NetMode.relay),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _RoleChip(
-                  label: 'Hotspot Lokal',
-                  selected: _netMode == NetMode.hotspot,
-                  onTap: () => _switchNetMode(NetMode.hotspot),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _RoleChip(
-                  label: 'HP 1: Pengirim',
+                  label: 'HP 1: Pengirim (Host)',
                   selected: _role == NodeRole.sender,
                   onTap: () => _switchRole(NodeRole.sender),
                 ),
@@ -567,7 +514,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: _RoleChip(
-                  label: 'HP 2: Penerima',
+                  label: 'HP 2: Penerima (Client)',
                   selected: _role == NodeRole.receiver,
                   onTap: () => _switchRole(NodeRole.receiver),
                 ),
@@ -575,111 +522,12 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          if (_netMode == NetMode.relay) ...[
-            SizedBox(
-              height: 36,
-              child: TextField(
-                controller: _relayUrlController,
-                keyboardType: TextInputType.url,
-                autocorrect: false,
-                enableSuggestions: false,
-                style: const TextStyle(fontSize: 12),
-                decoration: InputDecoration(
-                  hintText: 'URL Relay (mis. https://relay-anda.deno.dev)',
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  filled: true,
-                  fillColor: AppTokens.inkLight,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: SizedBox(
-                    height: 36,
-                    child: TextField(
-                      controller: _roomController,
-                      keyboardType: TextInputType.text,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      style: const TextStyle(fontSize: 13),
-                      decoration: InputDecoration(
-                        hintText: 'Kode Room (mis. 1234)',
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
-                        ),
-                        filled: true,
-                        fillColor: AppTokens.inkLight,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  height: 36,
-                  child: ElevatedButton(
-                    onPressed: _isConnecting
-                        ? null
-                        : (_isConnected ? _disconnectSocket : _connectSocket),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isConnected
-                          ? AppTokens.bgPrimaryPressed
-                          : AppTokens.bgPrimaryBtn,
-                      foregroundColor: AppTokens.inkLight,
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    child: Text(
-                      _isConnecting
-                          ? '...'
-                          : (_isConnected ? 'Putus' : 'Sambung'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Text(
-                    _statusText,
-                    overflow: TextOverflow.ellipsis,
-                    style:
-                        const TextStyle(fontSize: 11, color: AppTokens.inkMuted),
-                  ),
-                ),
-                if (_role == NodeRole.sender)
-                  Text(
-                    'Mic: ${_micGranted ? "Aktif" : "Belum"}',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: AppTokens.inkDark,
-                    ),
-                  ),
-              ],
-            ),
-          ] else if (_role == NodeRole.sender)
+          if (_role == NodeRole.sender) ...[
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'IP: $_hostIp:${AppTokens.wsPort} • Mic: ${_micGranted ? "Aktif" : "Belum"}',
+                  'Lokal: $_hostIp:${AppTokens.wsPort} • Mic: ${_micGranted ? "Aktif" : "Belum"}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
@@ -687,28 +535,99 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   ),
                 ),
                 Text(
-                  '${_hotspotClients.length} terhubung',
+                  '${_clients.length} terhubung',
                   style: const TextStyle(
                     fontSize: 11,
                     color: AppTokens.inkMuted,
                   ),
                 ),
               ],
-            )
-          else ...[
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 36,
+                    child: ElevatedButton(
+                      onPressed: _toggleTunnel,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: tunnelBusy
+                            ? AppTokens.bgPrimaryPressed
+                            : AppTokens.bgPrimaryBtn,
+                        foregroundColor: AppTokens.inkLight,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      child: Text(
+                        _tunnelStatus == 'running'
+                            ? 'Matikan Tunnel Publik'
+                            : (_tunnelStatus == 'starting'
+                                ? 'Membuka Tunnel...'
+                                : 'Mulai Tunnel Publik (Beda Jaringan)'),
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ),
+                ),
+                if (_tunnelUrl != null) ...[
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    height: 36,
+                    child: ElevatedButton(
+                      onPressed: _copyTunnelUrl,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTokens.inkLight,
+                        foregroundColor: AppTokens.inkDark,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      child: const Text(
+                        'Salin',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _tunnelUrl ?? _tunnelMessage,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight:
+                      _tunnelUrl != null ? FontWeight.w600 : FontWeight.w400,
+                  color: _tunnelUrl != null
+                      ? AppTokens.inkDark
+                      : AppTokens.inkMuted,
+                ),
+              ),
+            ),
+          ] else ...[
             Row(
               children: [
                 Expanded(
                   child: SizedBox(
                     height: 36,
                     child: TextField(
-                      controller: _ipController,
+                      controller: _targetController,
                       keyboardType: TextInputType.text,
                       autocorrect: false,
                       enableSuggestions: false,
-                      style: const TextStyle(fontSize: 13),
+                      style: const TextStyle(fontSize: 12),
                       decoration: InputDecoration(
-                        hintText: 'IP atau IP:Port (mis. 192.168.43.1)',
+                        hintText: 'Tempel Link Tunnel atau IP Hotspot',
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 10,
                           vertical: 8,
@@ -729,7 +648,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                   child: ElevatedButton(
                     onPressed: _isConnecting
                         ? null
-                        : (_isConnected ? _disconnectSocket : _connectSocket),
+                        : (_isConnected ? _disconnectClient : _connectToHost),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _isConnected
                           ? AppTokens.bgPrimaryPressed
@@ -754,7 +673,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                _statusText,
+                _clientStatus,
                 style: const TextStyle(fontSize: 11, color: AppTokens.inkMuted),
               ),
             ),
