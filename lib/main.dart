@@ -237,7 +237,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           final task = await Socket.startConnect(ip, port);
           return ConnectionTask.fromSocket(
             task.socket.then(
-              (raw) => SecureSocket.secure(raw, host: uri.host),
+              (raw) => SecureSocket.secure(
+                raw,
+                host: uri.host,
+                supportedProtocols: const ['http/1.1'],
+              ),
             ),
             task.cancel,
           );
@@ -829,15 +833,37 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Expanded(
-                child: Text(
-                  _statusText,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: AppTokens.inkMuted,
+                child: GestureDetector(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: _statusText));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Status/Error lengkap disalin!'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  },
+                  onLongPress: () {
+                    Clipboard.setData(ClipboardData(text: _statusText));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Status/Error lengkap disalin!'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  },
+                  child: Text(
+                    _statusText,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppTokens.inkMuted,
+                    ),
                   ),
                 ),
               ),
+              const SizedBox(width: 8),
               Text(
                 'Mic: ${_micGranted ? "Aktif" : "Belum"}',
                 style: const TextStyle(
