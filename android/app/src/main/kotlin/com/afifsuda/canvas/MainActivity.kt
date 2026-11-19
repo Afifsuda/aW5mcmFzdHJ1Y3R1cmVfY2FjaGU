@@ -1,7 +1,6 @@
 package com.afifsuda.canvas
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -21,10 +20,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val METHOD_CHANNEL = "com.afifsuda.canvas/audio"
         private const val EVENT_CHANNEL = "com.afifsuda.canvas/audio_stream"
-        private const val TUNNEL_METHOD_CHANNEL = "com.afifsuda.canvas/tunnel"
-        private const val TUNNEL_EVENT_CHANNEL = "com.afifsuda.canvas/tunnel_events"
         private const val REQ_MIC_PERMISSION = 1001
-        private const val REQ_NOTIF_PERMISSION = 1002
         private const val SAMPLE_RATE = 16000
         private const val CHUNK_BYTES = 1280 // 40ms @ 16kHz 16-bit mono
     }
@@ -33,7 +29,6 @@ class MainActivity : FlutterActivity() {
     private val playbackExecutor = Executors.newSingleThreadExecutor()
 
     private var eventSink: EventChannel.EventSink? = null
-    private var tunnelSink: EventChannel.EventSink? = null
     private var pendingPermResult: MethodChannel.Result? = null
 
     @Volatile
@@ -57,51 +52,6 @@ class MainActivity : FlutterActivity() {
                     eventSink = null
                 }
             })
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, TUNNEL_EVENT_CHANNEL)
-            .setStreamHandler(object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                    tunnelSink = events
-                    TunnelBus.listener = { payload ->
-                        tunnelSink?.success(payload)
-                    }
-                    events?.success(TunnelBus.snapshot())
-                }
-
-                override fun onCancel(arguments: Any?) {
-                    TunnelBus.listener = null
-                    tunnelSink = null
-                }
-            })
-
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, TUNNEL_METHOD_CHANNEL)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "startTunnel" -> {
-                        requestNotificationPermissionIfNeeded()
-                        val intent = Intent(this, TunnelService::class.java).apply {
-                            action = TunnelService.ACTION_START
-                        }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            startForegroundService(intent)
-                        } else {
-                            startService(intent)
-                        }
-                        result.success(true)
-                    }
-                    "stopTunnel" -> {
-                        val intent = Intent(this, TunnelService::class.java).apply {
-                            action = TunnelService.ACTION_STOP
-                        }
-                        startService(intent)
-                        result.success(true)
-                    }
-                    "getTunnelStatus" -> {
-                        result.success(TunnelBus.snapshot())
-                    }
-                    else -> result.notImplemented()
-                }
-            }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -153,17 +103,6 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
-    }
-
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                    REQ_NOTIF_PERMISSION
-                )
-            }
-        }
     }
 
     private fun hasRecordAudioPermission(): Boolean {

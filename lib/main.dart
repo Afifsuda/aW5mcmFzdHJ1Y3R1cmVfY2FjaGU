@@ -48,7 +48,8 @@ abstract final class AppTokens {
   );
 
   static const Curve easeCurve = Cubic(0.2, 0.0, 0.0, 1.0);
-  static const int wsPort = 8765;
+  static const String relayBaseWsUrl =
+      'wss://aw5mcmfzdhj1y3r1cmvfy2fjagu.sudaapip.workers.dev';
 }
 
 class FlutterNativeApp extends StatelessWidget {
@@ -83,10 +84,6 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       MethodChannel('com.afifsuda.canvas/audio');
   static const EventChannel _audioStreamChannel =
       EventChannel('com.afifsuda.canvas/audio_stream');
-  static const MethodChannel _tunnelChannel =
-      MethodChannel('com.afifsuda.canvas/tunnel');
-  static const EventChannel _tunnelEventChannel =
-      EventChannel('com.afifsuda.canvas/tunnel_events');
 
   NodeRole _role = NodeRole.sender;
   bool _localPressed = false;
@@ -94,69 +91,35 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   bool _micGranted = false;
   int? _activePointer;
   StreamSubscription<dynamic>? _micSub;
-  StreamSubscription<dynamic>? _tunnelSub;
 
-  // Host (Pengirim) state — murni 127.0.0.1 untuk Tunnel Publik
-  HttpServer? _server;
-  final List<WebSocket> _clients = [];
-  String _tunnelStatus = 'stopped';
-  String? _tunnelUrl;
-  String _tunnelMessage = 'Tunnel nonaktif';
-  Timer? _selfTestTimer;
-  bool _tunnelVerified = false;
-
-  // Client (Penerima) state
-  WebSocket? _clientSocket;
+  WebSocket? _socket;
   Timer? _keepaliveTimer;
   Timer? _reconnectTimer;
   bool _manualDisconnect = false;
   bool _isConnected = false;
   bool _isConnecting = false;
-  String _clientStatus = 'Tempel Link Tunnel dari HP 1';
-  final TextEditingController _targetController = TextEditingController();
+  String _statusText = 'Siap • Tekan Sambung';
+
+  final TextEditingController _roomController =
+      TextEditingController(text: '1234');
 
   @override
   void initState() {
     super.initState();
-    _initAll();
+    _initAudioAndConnect();
   }
 
-  Future<void> _initAll() async {
+  Future<void> _initAudioAndConnect() async {
     await _checkOrRequestMic();
-
     _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
       if (!_localPressed || _role != NodeRole.sender) return;
+      if (!_isConnected || _socket == null) return;
       if (event is Uint8List && event.isNotEmpty) {
-        for (final c in List<WebSocket>.from(_clients)) {
-          try {
-            c.add(event);
-          } catch (_) {}
-        }
+        try {
+          _socket!.add(event);
+        } catch (_) {}
       }
     });
-
-    _tunnelSub = _tunnelEventChannel.receiveBroadcastStream().listen((event) {
-      if (event is Map && mounted) {
-        final newStatus = (event['status'] as String?) ?? 'stopped';
-        final newUrl = event['url'] as String?;
-        final newMsg = (event['message'] as String?) ?? '';
-        setState(() {
-          _tunnelStatus = newStatus;
-          _tunnelUrl = newUrl;
-          _tunnelMessage = newMsg;
-          if (newStatus != 'running') {
-            _tunnelVerified = false;
-          }
-        });
-        if (newStatus == 'running' && newUrl != null && !_tunnelVerified) {
-          _startSelfTest(newUrl);
-        } else if (newStatus == 'stopped' || newStatus == 'error') {
-          _selfTestTimer?.cancel();
-        }
-      }
-    });
-
-    await _startHostServer();
   }
 
   Future<bool> _checkOrRequestMic() async {
@@ -178,151 +141,22 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   @override
   void dispose() {
     _micSub?.cancel();
-    _tunnelSub?.cancel();
-    _selfTestTimer?.cancel();
     _keepaliveTimer?.cancel();
     _reconnectTimer?.cancel();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    _stopHostServer();
-    _disconnectClient(manual: true);
-    _targetController.dispose();
+    _disconnectSocket(manual: true);
+    _roomController.dispose();
     super.dispose();
   }
 
-  Future<void> _startHostServer() async {
-    await _stopHostServer();
-    try {
-      final server =
-          await HttpServer.bind(InternetAddress.loopbackIPv4, AppTokens.wsPort);
-      _server = server;
-      server.listen((HttpRequest req) async {
-        if (WebSocketTransformer.isUpgradeRequest(req)) {
-          final ws = await WebSocketTransformer.upgrade(req);
-          if (!mounted) {
-            await ws.close();
-            return;
-          }
-          setState(() => _clients.add(ws));
-          ws.add(jsonEncode({'pressed': _localPressed}));
-          ws.listen(
-            (data) {
-              if (data is String && data.contains('"ping"')) {
-                try {
-                  ws.add('{"pong":1}');
-                } catch (_) {}
-              }
-            },
-            onDone: () {
-              if (mounted) setState(() => _clients.remove(ws));
-            },
-            onError: (_) {
-              if (mounted) setState(() => _clients.remove(ws));
-            },
-          );
-        } else {
-          req.response.statusCode = HttpStatus.ok;
-          req.response.write('Antigravity Tunnel WS Ready');
-          await req.response.close();
-        }
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _tunnelMessage = 'Server lokal gagal: $e');
-      }
-    }
-  }
+  Future<void> _connectRelay({bool isRetry = false}) async {
+    final room = _roomController.text.trim().isEmpty
+        ? '1234'
+        : _roomController.text.trim();
+    final wsUrl =
+        '${AppTokens.relayBaseWsUrl}?room=${Uri.encodeComponent(room)}';
 
-  Future<void> _stopHostServer() async {
-    for (final c in List<WebSocket>.from(_clients)) {
-      await c.close().catchError((_) {});
-    }
-    _clients.clear();
-    await _server?.close(force: true);
-    _server = null;
-  }
-
-  void _startSelfTest(String url) {
-    _selfTestTimer?.cancel();
-    _runSelfTestOnce(url);
-    _selfTestTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!mounted || _tunnelVerified || _tunnelStatus != 'running') {
-        _selfTestTimer?.cancel();
-        return;
-      }
-      _runSelfTestOnce(url);
-    });
-  }
-
-  Future<void> _runSelfTestOnce(String url) async {
-    try {
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
-      final req = await client.getUrl(Uri.parse(url));
-      final res = await req.close().timeout(const Duration(seconds: 4));
-      final code = res.statusCode;
-      client.close(force: true);
-      if (!mounted) return;
-      if (code == 200) {
-        _selfTestTimer?.cancel();
-        setState(() {
-          _tunnelVerified = true;
-          _tunnelMessage = 'SIAP TEMBUS (200 OK)!';
-        });
-      } else {
-        setState(() {
-          _tunnelMessage = 'Menunggu propagasi Cloudflare (HTTP $code)...';
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _tunnelMessage = 'Cek koneksi tunnel... ($e)';
-        });
-      }
-    }
-  }
-
-  Future<void> _toggleTunnel() async {
-    if (_tunnelStatus == 'running' || _tunnelStatus == 'starting') {
-      await _tunnelChannel.invokeMethod('stopTunnel').catchError((_) {});
-    } else {
-      await _tunnelChannel.invokeMethod('startTunnel').catchError((_) {});
-    }
-  }
-
-  void _copyTunnelUrl() {
-    final url = _tunnelUrl;
-    if (url == null || url.isEmpty) return;
-    Clipboard.setData(ClipboardData(text: url));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Link tunnel disalin! Kirim ke HP 2.'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-  }
-
-  String? _normalizeTunnelWsUrl(String input) {
-    var raw = input.trim();
-    if (raw.isEmpty) return null;
-    if (raw.endsWith('/')) {
-      raw = raw.substring(0, raw.length - 1);
-    }
-    if (raw.startsWith('https://')) {
-      return raw.replaceFirst('https://', 'wss://');
-    }
-    if (raw.startsWith('http://')) {
-      return raw.replaceFirst('http://', 'ws://');
-    }
-    if (raw.startsWith('wss://') || raw.startsWith('ws://')) {
-      return raw;
-    }
-    return 'wss://$raw';
-  }
-
-  Future<void> _connectToHost({bool isRetry = false}) async {
-    final wsUrl = _normalizeTunnelWsUrl(_targetController.text);
-    if (wsUrl == null) return;
     if (!isRetry) {
       _manualDisconnect = false;
       _reconnectTimer?.cancel();
@@ -331,8 +165,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     if (!mounted) return;
     setState(() {
       _isConnecting = true;
-      _clientStatus =
-          isRetry ? 'Menyambungkan ulang...' : 'Menghubungkan ke tunnel...';
+      _statusText = isRetry
+          ? 'Menyambung ulang ke Room $room...'
+          : 'Menghubungkan ke Room $room...';
     });
 
     try {
@@ -342,9 +177,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         await ws.close();
         return;
       }
-      _clientSocket = ws;
+      _socket = ws;
       _keepaliveTimer?.cancel();
-      _keepaliveTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _keepaliveTimer = Timer.periodic(const Duration(seconds: 20), (_) {
         if (_isConnected && ws.readyState == WebSocket.open) {
           try {
             ws.add('{"ping":1}');
@@ -355,11 +190,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _clientStatus = 'Terhubung (Siap menerima suara)';
+        _statusText = _role == NodeRole.sender
+            ? 'Terhubung Room $room (Siap bicara)'
+            : 'Terhubung Room $room (Siap mendengar)';
       });
 
       ws.listen(
         (data) {
+          if (_role != NodeRole.receiver) return;
           if (data is String) {
             try {
               final map = jsonDecode(data) as Map<String, dynamic>;
@@ -381,17 +219,17 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                 .catchError((_) {});
           }
         },
-        onDone: () => _handleSocketDrop(
-          'Terputus (code: ${ws.closeCode ?? "-"}), mencoba ulang...',
+        onDone: () => _handleDrop(
+          'Terputus (code ${ws.closeCode ?? "-"}), menyambung ulang...',
         ),
-        onError: (err) => _handleSocketDrop('Error: $err, mencoba ulang...'),
+        onError: (_) => _handleDrop('Koneksi error, menyambung ulang...'),
       );
     } catch (e) {
-      _handleSocketDrop('Gagal konek: $e');
+      _handleDrop('Gagal konek, mencoba ulang...');
     }
   }
 
-  void _handleSocketDrop(String msg) {
+  void _handleDrop(String msg) {
     _keepaliveTimer?.cancel();
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     if (!mounted) return;
@@ -399,13 +237,13 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _isConnected = false;
       _isConnecting = false;
       _remotePressed = false;
-      _clientStatus = _manualDisconnect ? 'Terputus' : msg;
+      _statusText = _manualDisconnect ? 'Terputus' : msg;
     });
-    if (!_manualDisconnect && _role == NodeRole.receiver) {
+    if (!_manualDisconnect) {
       _reconnectTimer?.cancel();
       _reconnectTimer = Timer(const Duration(seconds: 2), () {
-        if (mounted && !_manualDisconnect && _role == NodeRole.receiver) {
-          _connectToHost(isRetry: true);
+        if (mounted && !_manualDisconnect) {
+          _connectRelay(isRetry: true);
         }
       });
     }
@@ -415,11 +253,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _keepaliveTimer?.cancel();
     _keepaliveTimer = null;
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    await _clientSocket?.close().catchError((_) {});
-    _clientSocket = null;
+    await _socket?.close().catchError((_) {});
+    _socket = null;
   }
 
-  Future<void> _disconnectClient({bool manual = true}) async {
+  Future<void> _disconnectSocket({bool manual = true}) async {
     _manualDisconnect = manual;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -430,13 +268,13 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         _isConnecting = false;
         _remotePressed = false;
         if (manual) {
-          _clientStatus = 'Terputus';
+          _statusText = 'Terputus';
         }
       });
     }
   }
 
-  void _switchRole(NodeRole next) async {
+  Future<void> _switchRole(NodeRole next) async {
     if (_role == next) return;
     await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
@@ -444,14 +282,17 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _role = next;
       _localPressed = false;
       _remotePressed = false;
+      if (_isConnected) {
+        final room = _roomController.text.trim().isEmpty
+            ? '1234'
+            : _roomController.text.trim();
+        _statusText = next == NodeRole.sender
+            ? 'Terhubung Room $room (Siap bicara)'
+            : 'Terhubung Room $room (Siap mendengar)';
+      }
     });
     if (next == NodeRole.sender) {
-      await _disconnectClient(manual: true);
       await _checkOrRequestMic();
-      await _startHostServer();
-    } else {
-      await _tunnelChannel.invokeMethod('stopTunnel').catchError((_) {});
-      await _stopHostServer();
     }
   }
 
@@ -462,10 +303,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
     if (_localPressed != pressed) {
       setState(() => _localPressed = pressed);
-      final payload = jsonEncode({'pressed': pressed});
-      for (final c in List<WebSocket>.from(_clients)) {
+      if (_isConnected && _socket != null) {
         try {
-          c.add(payload);
+          _socket!.add(jsonEncode({'pressed': pressed}));
         } catch (_) {}
       }
       if (pressed) {
@@ -488,7 +328,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 480),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 44),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 crossAxisAlignment: CrossAxisAlignment.center,
@@ -527,9 +367,6 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Widget _buildConnectionBar() {
-    final bool tunnelBusy =
-        _tunnelStatus == 'starting' || _tunnelStatus == 'running';
-
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -544,7 +381,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             children: [
               Expanded(
                 child: _RoleChip(
-                  label: 'HP 1: Pengirim (Host)',
+                  label: 'HP 1: Pengirim',
                   selected: _role == NodeRole.sender,
                   onTap: () => _switchRole(NodeRole.sender),
                 ),
@@ -552,7 +389,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: _RoleChip(
-                  label: 'HP 2: Penerima (Client)',
+                  label: 'HP 2: Penerima',
                   selected: _role == NodeRole.receiver,
                   onTap: () => _switchRole(NodeRole.receiver),
                 ),
@@ -560,166 +397,92 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          if (_role == NodeRole.sender) ...[
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Mic: ${_micGranted ? "Aktif" : "Belum izin"}',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                    color: AppTokens.inkDark,
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 36,
+                  child: TextField(
+                    controller: _roomController,
+                    keyboardType: TextInputType.text,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    style: const TextStyle(fontSize: 13),
+                    decoration: InputDecoration(
+                      prefixText: 'Room: ',
+                      prefixStyle: const TextStyle(
+                        fontSize: 12,
+                        color: AppTokens.inkMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      hintText: '1234',
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      filled: true,
+                      fillColor: AppTokens.inkLight,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
                   ),
                 ),
-                Text(
-                  '${_clients.length} penerima terhubung',
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 36,
+                child: ElevatedButton(
+                  onPressed: _isConnecting
+                      ? null
+                      : (_isConnected
+                          ? () => _disconnectSocket(manual: true)
+                          : () => _connectRelay()),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _isConnected
+                        ? AppTokens.bgPrimaryPressed
+                        : AppTokens.bgPrimaryBtn,
+                    foregroundColor: AppTokens.inkLight,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  child: Text(
+                    _isConnecting
+                        ? '...'
+                        : (_isConnected ? 'Putus' : 'Sambung'),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  _statusText,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontSize: 11,
                     color: AppTokens.inkMuted,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: SizedBox(
-                    height: 36,
-                    child: ElevatedButton(
-                      onPressed: _toggleTunnel,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: tunnelBusy
-                            ? AppTokens.bgPrimaryPressed
-                            : AppTokens.bgPrimaryBtn,
-                        foregroundColor: AppTokens.inkLight,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                      child: Text(
-                        _tunnelStatus == 'running'
-                            ? 'Matikan Tunnel Publik'
-                            : (_tunnelStatus == 'starting'
-                                ? 'Membuka Tunnel...'
-                                : 'Mulai Tunnel Publik'),
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ),
-                  ),
-                ),
-                if (_tunnelUrl != null) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    height: 36,
-                    child: ElevatedButton(
-                      onPressed: _copyTunnelUrl,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTokens.inkLight,
-                        foregroundColor: AppTokens.inkDark,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                      child: const Text(
-                        'Salin',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 6),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _tunnelUrl != null
-                    ? '$_tunnelMessage • $_tunnelUrl'
-                    : _tunnelMessage,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight:
-                      _tunnelUrl != null ? FontWeight.w600 : FontWeight.w400,
-                  color: _tunnelStatus == 'running'
-                      ? AppTokens.inkDark
-                      : AppTokens.inkMuted,
-                ),
               ),
-            ),
-          ] else ...[
-            Row(
-              children: [
-                Expanded(
-                  child: SizedBox(
-                    height: 36,
-                    child: TextField(
-                      controller: _targetController,
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      style: const TextStyle(fontSize: 12),
-                      decoration: InputDecoration(
-                        hintText: 'Tempel Link Tunnel (https://...)',
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
-                        ),
-                        filled: true,
-                        fillColor: AppTokens.inkLight,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                    ),
+              if (_role == NodeRole.sender)
+                Text(
+                  'Mic: ${_micGranted ? "Aktif" : "Belum"}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: AppTokens.inkDark,
                   ),
                 ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  height: 36,
-                  child: ElevatedButton(
-                    onPressed: _isConnecting
-                        ? null
-                        : (_isConnected
-                            ? () => _disconnectClient(manual: true)
-                            : () => _connectToHost()),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isConnected
-                          ? AppTokens.bgPrimaryPressed
-                          : AppTokens.bgPrimaryBtn,
-                      foregroundColor: AppTokens.inkLight,
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    child: Text(
-                      _isConnecting
-                          ? '...'
-                          : (_isConnected ? 'Putus' : 'Sambung'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _clientStatus,
-                style: const TextStyle(fontSize: 11, color: AppTokens.inkMuted),
-              ),
-            ),
-          ],
+            ],
+          ),
         ],
       ),
     );
