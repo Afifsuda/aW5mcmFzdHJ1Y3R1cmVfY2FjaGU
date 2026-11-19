@@ -192,17 +192,19 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Future<void> _connectToHost() async {
-    final targetIp = _ipController.text.trim();
-    if (targetIp.isEmpty) return;
+    var raw = _ipController.text.trim();
+    if (raw.isEmpty) return;
+    raw = raw.replaceFirst(RegExp(r'^wss?://'), '');
+    final wsUrl = raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
     await _disconnectClient();
     if (!mounted) return;
     setState(() {
       _isConnecting = true;
-      _clientStatus = 'Menghubungkan ke $targetIp...';
+      _clientStatus = 'Menghubungkan ke $wsUrl...';
     });
 
     try {
-      final ws = await WebSocket.connect('ws://$targetIp:${AppTokens.wsPort}')
+      final ws = await WebSocket.connect(wsUrl)
           .timeout(const Duration(seconds: 5));
       if (!mounted) {
         await ws.close();
@@ -212,7 +214,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _clientStatus = 'Terhubung ke $targetIp';
+        _clientStatus = 'Terhubung ke $raw';
       });
       ws.listen(
         (data) {
@@ -248,7 +250,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         setState(() {
           _isConnected = false;
           _isConnecting = false;
-          _clientStatus = 'Gagal konek ke $targetIp';
+          _clientStatus = 'Gagal konek ke $raw';
         });
       }
     }
@@ -404,10 +406,12 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                     height: 36,
                     child: TextField(
                       controller: _ipController,
-                      keyboardType: TextInputType.number,
+                      keyboardType: TextInputType.text,
+                      autocorrect: false,
+                      enableSuggestions: false,
                       style: const TextStyle(fontSize: 13),
                       decoration: InputDecoration(
-                        hintText: 'IP Pengirim (mis. 192.168.43.1)',
+                        hintText: 'IP atau IP:Port (mis. 192.168.43.1)',
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 10,
                           vertical: 8,
