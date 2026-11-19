@@ -102,6 +102,8 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   String _tunnelStatus = 'stopped';
   String? _tunnelUrl;
   String _tunnelMessage = 'Tunnel nonaktif';
+  Timer? _selfTestTimer;
+  bool _tunnelVerified = false;
 
   // Client (Penerima) state
   WebSocket? _clientSocket;
@@ -135,11 +137,22 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
 
     _tunnelSub = _tunnelEventChannel.receiveBroadcastStream().listen((event) {
       if (event is Map && mounted) {
+        final newStatus = (event['status'] as String?) ?? 'stopped';
+        final newUrl = event['url'] as String?;
+        final newMsg = (event['message'] as String?) ?? '';
         setState(() {
-          _tunnelStatus = (event['status'] as String?) ?? 'stopped';
-          _tunnelUrl = event['url'] as String?;
-          _tunnelMessage = (event['message'] as String?) ?? '';
+          _tunnelStatus = newStatus;
+          _tunnelUrl = newUrl;
+          _tunnelMessage = newMsg;
+          if (newStatus != 'running') {
+            _tunnelVerified = false;
+          }
         });
+        if (newStatus == 'running' && newUrl != null && !_tunnelVerified) {
+          _startSelfTest(newUrl);
+        } else if (newStatus == 'stopped' || newStatus == 'error') {
+          _selfTestTimer?.cancel();
+        }
       }
     });
 
@@ -166,6 +179,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   void dispose() {
     _micSub?.cancel();
     _tunnelSub?.cancel();
+    _selfTestTimer?.cancel();
     _keepaliveTimer?.cancel();
     _reconnectTimer?.cancel();
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
@@ -227,6 +241,46 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _clients.clear();
     await _server?.close(force: true);
     _server = null;
+  }
+
+  void _startSelfTest(String url) {
+    _selfTestTimer?.cancel();
+    _runSelfTestOnce(url);
+    _selfTestTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!mounted || _tunnelVerified || _tunnelStatus != 'running') {
+        _selfTestTimer?.cancel();
+        return;
+      }
+      _runSelfTestOnce(url);
+    });
+  }
+
+  Future<void> _runSelfTestOnce(String url) async {
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+      final req = await client.getUrl(Uri.parse(url));
+      final res = await req.close().timeout(const Duration(seconds: 4));
+      final code = res.statusCode;
+      client.close(force: true);
+      if (!mounted) return;
+      if (code == 200) {
+        _selfTestTimer?.cancel();
+        setState(() {
+          _tunnelVerified = true;
+          _tunnelMessage = 'SIAP TEMBUS (200 OK)!';
+        });
+      } else {
+        setState(() {
+          _tunnelMessage = 'Menunggu propagasi Cloudflare (HTTP $code)...';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _tunnelMessage = 'Cek koneksi tunnel... ($e)';
+        });
+      }
+    }
   }
 
   Future<void> _toggleTunnel() async {
