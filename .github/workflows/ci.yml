@@ -24,19 +24,61 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Check Flutter Project
+        id: project_check
+        run: |
+          if [ -f pubspec.yaml ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "pubspec.yaml tidak ditemukan. Melewati step build Flutter."
+          fi
+
       - name: Set up Flutter SDK
+        if: steps.project_check.outputs.exists == 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
 
+      - name: Decode Keystore & Configure Signing
+        if: steps.project_check.outputs.exists == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            mkdir -p android/app
+            echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            printf "storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=%s/android/app/release.keystore\n" \
+              "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" "${{ github.workspace }}" > android/key.properties
+            echo "Release signing configured via GitHub Secrets."
+          else
+            echo "Signing secrets belum lengkap/diatur. Menggunakan konfigurasi signing bawaan proyek."
+          fi
+
       - name: Install Dependencies
+        if: steps.project_check.outputs.exists == 'true'
         run: flutter pub get
 
       - name: Build Android Release APK
+        if: steps.project_check.outputs.exists == 'true'
         run: flutter build apk --release --android-skip-build-dependency-validation
 
+      - name: Cleanup Keystore Secrets
+        if: always() && steps.project_check.outputs.exists == 'true'
+        run: |
+          rm -f android/app/release.keystore android/key.properties
+
       - name: Generate Release Tag Name
+        if: steps.project_check.outputs.exists == 'true'
         id: release_info
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
@@ -47,6 +89,7 @@ jobs:
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
       - name: Publish to GitHub Releases
+        if: steps.project_check.outputs.exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: build/app/outputs/flutter-apk/app-release.apk
