@@ -79,10 +79,17 @@ class VoiceNodeScreen extends StatefulWidget {
 }
 
 class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
+  static const MethodChannel _audioChannel =
+      MethodChannel('com.afifsuda.canvas/audio');
+  static const EventChannel _audioStreamChannel =
+      EventChannel('com.afifsuda.canvas/audio_stream');
+
   NodeRole _role = NodeRole.sender;
   bool _localPressed = false;
   bool _remotePressed = false;
+  bool _micGranted = false;
   int? _activePointer;
+  StreamSubscription<dynamic>? _micSub;
 
   // Host (Pengirim) state
   HttpServer? _server;
@@ -99,11 +106,45 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   @override
   void initState() {
     super.initState();
-    _startHostServer();
+    _initAudioAndServer();
+  }
+
+  Future<void> _initAudioAndServer() async {
+    await _checkOrRequestMic();
+    _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
+      if (!_localPressed || _role != NodeRole.sender) return;
+      if (event is Uint8List && event.isNotEmpty) {
+        for (final c in List<WebSocket>.from(_clients)) {
+          try {
+            c.add(event);
+          } catch (_) {}
+        }
+      }
+    });
+    await _startHostServer();
+  }
+
+  Future<bool> _checkOrRequestMic() async {
+    try {
+      bool granted =
+          await _audioChannel.invokeMethod<bool>('hasMicPermission') ?? false;
+      if (!granted) {
+        granted =
+            await _audioChannel.invokeMethod<bool>('requestMicPermission') ??
+                false;
+      }
+      if (mounted) setState(() => _micGranted = granted);
+      return granted;
+    } catch (_) {
+      return false;
+    }
   }
 
   @override
   void dispose() {
+    _micSub?.cancel();
+    _audioChannel.invokeMethod('stopCapture').catchError((_) {});
+    _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     _stopHostServer();
     _disconnectClient();
     _ipController.dispose();
@@ -120,7 +161,6 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           final ip = addr.address;
-          // Prioritaskan IP Hotspot Android (umumnya 192.168.43.x atau 192.168.x.x)
           if (ip.startsWith('192.168.')) {
             return ip;
           }
@@ -140,7 +180,8 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     setState(() => _hostIp = ip);
 
     try {
-      final server = await HttpServer.bind(InternetAddress.anyIPv4, AppTokens.wsPort);
+      final server =
+          await HttpServer.bind(InternetAddress.anyIPv4, AppTokens.wsPort);
       _server = server;
       server.listen((HttpRequest req) async {
         if (WebSocketTransformer.isUpgradeRequest(req)) {
@@ -195,7 +236,8 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     var raw = _ipController.text.trim();
     if (raw.isEmpty) return;
     raw = raw.replaceFirst(RegExp(r'^wss?://'), '');
-    final wsUrl = raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
+    final wsUrl =
+        raw.contains(':') ? 'ws://$raw' : 'ws://$raw:${AppTokens.wsPort}';
     await _disconnectClient();
     if (!mounted) return;
     setState(() {
@@ -214,19 +256,33 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _clientStatus = 'Terhubung ke $raw';
+        _clientStatus = 'Terhubung ke $raw (Siap menerima suara)';
       });
       ws.listen(
         (data) {
-          try {
-            final map = jsonDecode(data as String) as Map<String, dynamic>;
-            final pressed = map['pressed'] == true;
-            if (mounted && _remotePressed != pressed) {
-              setState(() => _remotePressed = pressed);
-            }
-          } catch (_) {}
+          if (data is String) {
+            try {
+              final map = jsonDecode(data) as Map<String, dynamic>;
+              final pressed = map['pressed'] == true;
+              if (mounted && _remotePressed != pressed) {
+                setState(() => _remotePressed = pressed);
+              }
+              if (pressed) {
+                _audioChannel.invokeMethod('startPlayback').catchError((_) {});
+              } else {
+                _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+              }
+            } catch (_) {}
+          } else if (data is List<int>) {
+            final bytes =
+                data is Uint8List ? data : Uint8List.fromList(data);
+            _audioChannel
+                .invokeMethod('writePlayback', bytes)
+                .catchError((_) {});
+          }
         },
         onDone: () {
+          _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
           if (mounted) {
             setState(() {
               _isConnected = false;
@@ -236,6 +292,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           }
         },
         onError: (_) {
+          _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
           if (mounted) {
             setState(() {
               _isConnected = false;
@@ -257,6 +314,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Future<void> _disconnectClient() async {
+    await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     await _clientSocket?.close().catchError((_) {});
     _clientSocket = null;
     if (mounted) {
@@ -270,6 +328,8 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
 
   void _switchRole(NodeRole next) async {
     if (_role == next) return;
+    await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
+    await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     setState(() {
       _role = next;
       _localPressed = false;
@@ -277,6 +337,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     });
     if (next == NodeRole.sender) {
       await _disconnectClient();
+      await _checkOrRequestMic();
       await _startHostServer();
     } else {
       await _stopHostServer();
@@ -284,7 +345,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     }
   }
 
-  void _setPressed(bool pressed) {
+  Future<void> _setPressed(bool pressed) async {
+    if (pressed && !_micGranted) {
+      final ok = await _checkOrRequestMic();
+      if (!ok) return;
+    }
     if (_localPressed != pressed) {
       setState(() => _localPressed = pressed);
       final payload = jsonEncode({'pressed': pressed});
@@ -292,6 +357,11 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
         try {
           c.add(payload);
         } catch (_) {}
+      }
+      if (pressed) {
+        _audioChannel.invokeMethod('startCapture').catchError((_) {});
+      } else {
+        _audioChannel.invokeMethod('stopCapture').catchError((_) {});
       }
     }
   }
@@ -382,9 +452,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'IP Hotspot: $_hostIp:${AppTokens.wsPort}',
+                  'IP: $_hostIp:${AppTokens.wsPort} • Mic: ${_micGranted ? "Aktif" : "Belum izin"}',
                   style: const TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     fontWeight: FontWeight.w500,
                     color: AppTokens.inkDark,
                   ),
@@ -392,7 +462,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                 Text(
                   '${_clients.length} terhubung',
                   style: const TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     color: AppTokens.inkMuted,
                   ),
                 ),
