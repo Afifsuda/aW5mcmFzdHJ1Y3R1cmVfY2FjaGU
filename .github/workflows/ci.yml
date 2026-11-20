@@ -1,4 +1,4 @@
-name: Build Flutter Canvas APK
+name: Build Rust Canvas APK
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build & Release APK
+    name: Build & Release Rust APK
     runs-on: ubuntu-latest
 
     steps:
@@ -24,30 +24,25 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Gradle Cache
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
+          gradle-version: '9.1.0'
           cache-read-only: false
 
-      - name: Check Flutter Project
-        id: project_check
-        run: |
-          if [ -f pubspec.yaml ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "pubspec.yaml tidak ditemukan. Melewati step build Flutter."
-          fi
-
-      - name: Set up Flutter SDK
-        if: steps.project_check.outputs.exists == 'true'
-        uses: subosito/flutter-action@v2
+      - name: Setup Rust Toolchain (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
         with:
-          channel: 'stable'
-          cache: true
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@cargo-ndk
+
+      - name: Build Rust Native Library (arm64-v8a)
+        run: |
+          cargo ndk -t arm64-v8a -p 24 -o android/app/src/main/jniLibs build --release
 
       - name: Decode Keystore & Configure Signing
-        if: steps.project_check.outputs.exists == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -64,21 +59,15 @@ jobs:
             echo "Signing secrets belum lengkap/diatur. Menggunakan konfigurasi signing bawaan proyek."
           fi
 
-      - name: Install Dependencies
-        if: steps.project_check.outputs.exists == 'true'
-        run: flutter pub get
-
       - name: Build Android Release APK
-        if: steps.project_check.outputs.exists == 'true'
-        run: flutter build apk --release --target-platform android-arm64 --android-skip-build-dependency-validation
+        run: gradle -p android assembleRelease
 
       - name: Cleanup Keystore Secrets
-        if: always() && steps.project_check.outputs.exists == 'true'
+        if: always()
         run: |
           rm -f android/app/release.keystore android/key.properties
 
       - name: Generate Release Tag Name
-        if: steps.project_check.outputs.exists == 'true'
         id: release_info
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
@@ -89,14 +78,13 @@ jobs:
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
       - name: Publish to GitHub Releases
-        if: steps.project_check.outputs.exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: build/app/outputs/apk/release/app-release.apk
           tag_name: ${{ steps.release_info.outputs.tag_name }}
-          name: "Canvas Release ${{ steps.release_info.outputs.tag_name }}"
+          name: "Rust Canvas Release ${{ steps.release_info.outputs.tag_name }}"
           body: |
-            Release build APK Flutter (Layar Putih Bersih).
+            Release build APK Rust (Kanvas Kosong Bersih).
             Commit: ${{ github.sha }}
           draft: false
           prerelease: false
