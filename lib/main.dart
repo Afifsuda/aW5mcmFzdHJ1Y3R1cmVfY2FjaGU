@@ -356,7 +356,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       _reconnectTimer?.cancel();
       _reconnectTimer = Timer(const Duration(seconds: 2), () {
         if (mounted && !_manualDisconnect && !_isConnected && !_isConnecting) {
-          _connect();
+          _connectRelay(isRetry: true);
         }
       });
     }
