@@ -35,14 +35,15 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - name: Install cargo-ndk
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
-
       - name: Build Rust Native Library (arm64-v8a)
         run: |
-          cargo ndk -t arm64-v8a -p 24 -o android/app/src/main/jniLibs build --release
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          cargo build --target aarch64-linux-android --release
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/libantigravity_canvas.so android/app/src/main/jniLibs/arm64-v8a/
 
       - name: Decode Keystore & Configure Signing
         env:
