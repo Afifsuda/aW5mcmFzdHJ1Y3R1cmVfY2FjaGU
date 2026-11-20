@@ -152,9 +152,7 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "stopMusicCapture" -> {
-                        stopAudioCapture()
-                        mediaProjection?.stop()
-                        mediaProjection = null
+                        stopMusicProjection()
                         result.success(true)
                     }
                     "startPlayback" -> {
@@ -367,20 +365,66 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                val projection = mgr.getMediaProjection(resultCode, data)
-                if (projection != null) {
-                    mediaProjection = projection
-                    val started = startInternalAudioCapture(projection)
-                    pendingMusicResult?.success(started)
+                val pending = pendingMusicResult
+                pendingMusicResult = null
+                MediaProjectionService.onForegroundReady = {
+                    mainHandler.post {
+                        try {
+                            val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                            val projection = mgr.getMediaProjection(resultCode, data)
+                            if (projection != null) {
+                                projection.registerCallback(object : MediaProjection.Callback() {
+                                    override fun onStop() {
+                                        stopAudioCapture()
+                                    }
+                                }, mainHandler)
+                                mediaProjection = projection
+                                val started = startInternalAudioCapture(projection)
+                                pending?.success(started)
+                            } else {
+                                stopMediaProjectionService()
+                                pending?.success(false)
+                            }
+                        } catch (_: Throwable) {
+                            stopMediaProjectionService()
+                            pending?.success(false)
+                        }
+                    }
+                }
+                val svcIntent = Intent(this, MediaProjectionService::class.java).apply {
+                    action = MediaProjectionService.ACTION_START
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(svcIntent)
                 } else {
-                    pendingMusicResult?.success(false)
+                    startService(svcIntent)
                 }
             } else {
                 pendingMusicResult?.success(false)
+                pendingMusicResult = null
             }
-            pendingMusicResult = null
         }
+    }
+
+    private fun stopMediaProjectionService() {
+        MediaProjectionService.onForegroundReady = null
+        try {
+            val svcIntent = Intent(this, MediaProjectionService::class.java).apply {
+                action = MediaProjectionService.ACTION_STOP
+            }
+            startService(svcIntent)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun stopMusicProjection() {
+        stopAudioCapture()
+        try {
+            mediaProjection?.stop()
+        } catch (_: Throwable) {
+        }
+        mediaProjection = null
+        stopMediaProjectionService()
     }
 
     private fun startInternalAudioCapture(projection: MediaProjection): Boolean {
@@ -445,9 +489,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        stopAudioCapture()
-        mediaProjection?.stop()
-        mediaProjection = null
+        stopMusicProjection()
         stopAudioPlayback()
         playbackExecutor.shutdownNow()
         super.onDestroy()

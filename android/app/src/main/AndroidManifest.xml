@@ -36,7 +36,12 @@
         <service
             android:name=".KeepAliveService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback|mediaProjection" />
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".MediaProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <meta-data
             android:name="flutterEmbedding"
