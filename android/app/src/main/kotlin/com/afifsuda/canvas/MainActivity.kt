@@ -33,10 +33,10 @@ class MainActivity : FlutterActivity() {
         private const val REQ_MIC_PERMISSION = 1001
         private const val REQ_NOTIF_PERMISSION = 1002
         private const val REQ_MEDIA_PROJECTION = 1003
-        private const val SAMPLE_RATE = 16000
-        private const val CHUNK_BYTES = 1280 // 40ms @ 16kHz 16-bit mono
+        private const val SAMPLE_RATE = 48000
+        private const val CHUNK_BYTES = 3840 // 40ms @ 48kHz 16-bit mono
         private const val MUSIC_SAMPLE_RATE = 48000
-        private const val MUSIC_CHUNK_BYTES = 3840 // 40ms @ 48kHz 16-bit mono
+        private const val MUSIC_CHUNK_BYTES = 7680 // 40ms @ 48kHz 16-bit stereo
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -158,8 +158,10 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "startPlayback" -> {
-                        val rate = (call.arguments as? Int) ?: SAMPLE_RATE
-                        startAudioPlayback(rate)
+                        val args = call.arguments as? Map<*, *>
+                        val rate = (args?.get("sampleRate") as? Number)?.toInt() ?: SAMPLE_RATE
+                        val channels = (args?.get("channels") as? Number)?.toInt() ?: 1
+                        startAudioPlayback(rate, channels)
                         result.success(true)
                     }
                     "writePlayback" -> {
@@ -308,11 +310,12 @@ class MainActivity : FlutterActivity() {
     }
 
     private var currentPlaybackRate = SAMPLE_RATE
+    private var currentPlaybackChannels = 1
 
-    private fun startAudioPlayback(sampleRate: Int = SAMPLE_RATE) {
+    private fun startAudioPlayback(sampleRate: Int = SAMPLE_RATE, channels: Int = 1) {
         synchronized(playbackLock) {
             if (audioTrack != null) {
-                if (currentPlaybackRate == sampleRate) return
+                if (currentPlaybackRate == sampleRate && currentPlaybackChannels == channels) return
                 val old = audioTrack
                 audioTrack = null
                 try {
@@ -323,11 +326,13 @@ class MainActivity : FlutterActivity() {
                 }
             }
             currentPlaybackRate = sampleRate
-            val isMusic = sampleRate >= 44100
-            val chunkBytes = if (isMusic) MUSIC_CHUNK_BYTES else CHUNK_BYTES
+            currentPlaybackChannels = channels
+            val isStereo = channels == 2
+            val channelMask = if (isStereo) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+            val chunkBytes = if (isStereo) MUSIC_CHUNK_BYTES else CHUNK_BYTES
             val minBuf = AudioTrack.getMinBufferSize(
                 sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
+                channelMask,
                 AudioFormat.ENCODING_PCM_16BIT
             )
             val bufferSize = maxOf(minBuf, chunkBytes * 4)
@@ -336,7 +341,7 @@ class MainActivity : FlutterActivity() {
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(
-                            if (isMusic) AudioAttributes.CONTENT_TYPE_MUSIC
+                            if (isStereo) AudioAttributes.CONTENT_TYPE_MUSIC
                             else AudioAttributes.CONTENT_TYPE_SPEECH
                         )
                         .build()
@@ -345,7 +350,7 @@ class MainActivity : FlutterActivity() {
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .setChannelMask(channelMask)
                         .build()
                 )
                 .setBufferSizeInBytes(bufferSize)
@@ -460,7 +465,7 @@ class MainActivity : FlutterActivity() {
 
         val minBuf = AudioRecord.getMinBufferSize(
             MUSIC_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.CHANNEL_IN_STEREO,
             AudioFormat.ENCODING_PCM_16BIT
         )
         val bufferSize = maxOf(minBuf, MUSIC_CHUNK_BYTES * 4)
@@ -471,7 +476,7 @@ class MainActivity : FlutterActivity() {
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setSampleRate(MUSIC_SAMPLE_RATE)
-                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
                         .build()
                 )
                 .setBufferSizeInBytes(bufferSize)
