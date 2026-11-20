@@ -1,16 +1,20 @@
 package com.afifsuda.canvas
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -28,6 +32,7 @@ class MainActivity : FlutterActivity() {
         private const val KEY_ROOM = "last_room"
         private const val REQ_MIC_PERMISSION = 1001
         private const val REQ_NOTIF_PERMISSION = 1002
+        private const val REQ_MEDIA_PROJECTION = 1003
         private const val SAMPLE_RATE = 16000
         private const val CHUNK_BYTES = 1280 // 40ms @ 16kHz 16-bit mono
     }
@@ -37,6 +42,8 @@ class MainActivity : FlutterActivity() {
 
     private var eventSink: EventChannel.EventSink? = null
     private var pendingPermResult: MethodChannel.Result? = null
+    private var pendingMusicResult: MethodChannel.Result? = null
+    private var mediaProjection: MediaProjection? = null
 
     @Volatile
     private var isCapturing = false
@@ -127,6 +134,27 @@ class MainActivity : FlutterActivity() {
                     }
                     "stopCapture" -> {
                         stopAudioCapture()
+                        result.success(true)
+                    }
+                    "isInternalAudioSupported" -> {
+                        result.success(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    }
+                    "startMusicCapture" -> {
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                            result.error("UNSUPPORTED", "Butuh Android 10+ untuk rekam audio internal", null)
+                        } else if (!hasRecordAudioPermission()) {
+                            result.error("NO_PERMISSION", "Izin mikrofon/audio belum diberikan", null)
+                        } else {
+                            val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                            pendingMusicResult?.success(false)
+                            pendingMusicResult = result
+                            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION)
+                        }
+                    }
+                    "stopMusicCapture" -> {
+                        stopAudioCapture()
+                        mediaProjection?.stop()
+                        mediaProjection = null
                         result.success(true)
                     }
                     "startPlayback" -> {
@@ -335,8 +363,87 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_MEDIA_PROJECTION) {
+            if (resultCode == Activity.RESULT_OK && data != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                val projection = mgr.getMediaProjection(resultCode, data)
+                mediaProjection = projection
+                val started = startInternalAudioCapture(projection)
+                pendingMusicResult?.success(started)
+            } else {
+                pendingMusicResult?.success(false)
+            }
+            pendingMusicResult = null
+        }
+    }
+
+    private fun startInternalAudioCapture(projection: MediaProjection): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        stopAudioCapture()
+
+        val config = AudioPlaybackCaptureConfiguration.Builder(projection)
+            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+            .build()
+
+        val minBuf = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        val bufferSize = maxOf(minBuf, CHUNK_BYTES * 4)
+
+        val record = try {
+            AudioRecord.Builder()
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .setAudioPlaybackCaptureConfig(config)
+                .build()
+        } catch (_: Throwable) {
+            return false
+        }
+
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            return false
+        }
+
+        audioRecord = record
+        isCapturing = true
+        record.startRecording()
+
+        captureThread = Thread {
+            val buf = ByteArray(CHUNK_BYTES)
+            while (isCapturing) {
+                val read = record.read(buf, 0, buf.size)
+                if (read > 0) {
+                    val copy = buf.copyOf(read)
+                    mainHandler.post {
+                        eventSink?.success(copy)
+                    }
+                }
+            }
+        }.apply {
+            name = "AgyMusicCapture"
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+        return true
+    }
+
     override fun onDestroy() {
         stopAudioCapture()
+        mediaProjection?.stop()
+        mediaProjection = null
         stopAudioPlayback()
         playbackExecutor.shutdownNow()
         super.onDestroy()

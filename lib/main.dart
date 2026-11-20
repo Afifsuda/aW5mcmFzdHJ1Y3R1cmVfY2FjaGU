@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,7 +58,7 @@ class FlutterNativeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Antigravity HT & Video',
+      title: 'Antigravity HT & Musik',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.light,
@@ -71,7 +70,7 @@ class FlutterNativeApp extends StatelessWidget {
   }
 }
 
-enum AppMode { voice, video }
+enum AppMode { voice, music }
 
 class VoiceNodeScreen extends StatefulWidget {
   const VoiceNodeScreen({super.key});
@@ -105,20 +104,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   String _statusText = 'Menyiapkan koneksi...';
   final TextEditingController _roomController = TextEditingController();
 
-  // WebRTC Video Call state
-  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-  bool _renderersReady = false;
-  RTCPeerConnection? _peerConnection;
-  MediaStream? _localStream;
-  MediaStream? _remoteStream;
-  final List<RTCIceCandidate> _pendingCandidates = [];
-  bool _remoteDescSet = false;
-  bool _inCall = false;
-  bool _callBusy = false;
-  bool _micMuted = false;
-  bool _camOff = false;
-  String _callStatus = 'Siap Video Call';
+  // Stream Musik (Internal Audio Capture) state
+  bool _isMusicStreaming = false;
+  bool _musicBusy = false;
 
   @override
   void initState() {
@@ -127,15 +115,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   Future<void> _boot() async {
-    await _localRenderer.initialize();
-    await _remoteRenderer.initialize();
-    if (mounted) setState(() => _renderersReady = true);
-
     await _checkOrRequestMic();
 
     _micSub = _audioStreamChannel.receiveBroadcastStream().listen((event) {
-      if (_mode != AppMode.voice || _inCall) return;
-      if (!_localPressed || !_isConnected || _socket == null) return;
+      final canSendVoice = _mode == AppMode.voice && _localPressed;
+      final canSendMusic = _mode == AppMode.music && _isMusicStreaming;
+      if ((!canSendVoice && !canSendMusic) || !_isConnected || _socket == null) {
+        return;
+      }
       if (event is Uint8List && event.isNotEmpty) {
         try {
           _socket!.add(event);
@@ -177,9 +164,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     _micSub?.cancel();
     _keepaliveTimer?.cancel();
     _reconnectTimer?.cancel();
-    _hangupCall(notifyPeer: false);
-    _localRenderer.dispose();
-    _remoteRenderer.dispose();
+    _audioChannel.invokeMethod('stopMusicCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopCapture').catchError((_) {});
     _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
     _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
@@ -310,7 +295,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           if (data is String) {
             _handleIncomingText(data);
           } else if (data is List<int>) {
-            if (_mode != AppMode.voice || _inCall || _localPressed) return;
+            if (_localPressed || _isMusicStreaming) return;
             final bytes = data is Uint8List ? data : Uint8List.fromList(data);
             _audioChannel
                 .invokeMethod('writePlayback', bytes)
@@ -330,17 +315,12 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   void _handleIncomingText(String raw) {
     try {
       final map = jsonDecode(raw) as Map<String, dynamic>;
-      if (map.containsKey('webrtc')) {
-        _handleWebRtcSignal(map);
-        return;
-      }
       if (map.containsKey('pressed')) {
-        if (_mode != AppMode.voice || _inCall) return;
         final pressed = map['pressed'] == true;
         if (mounted && _remotePressed != pressed) {
           setState(() => _remotePressed = pressed);
         }
-        if (pressed && !_localPressed) {
+        if (pressed && !_localPressed && !_isMusicStreaming) {
           _audioChannel.invokeMethod('startPlayback').catchError((_) {});
         } else if (!pressed) {
           _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
@@ -350,365 +330,37 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   // ==========================================================
-  // WEBRTC VIDEO CALL LOGIC
-  // ==========================================================
-
-  Future<RTCPeerConnection> _createRtcConnection() async {
-    final config = {
-      'iceServers': [
-        {'urls': 'stun:stun.l.google.com:19302'},
-        {'urls': 'stun:stun1.l.google.com:19302'},
-        {'urls': 'stun:stun.cloudflare.com:3478'},
-      ],
-      'sdpSemantics': 'unified-plan',
-    };
-
-    final pc = await createPeerConnection(config);
-    _pendingCandidates.clear();
-    _remoteDescSet = false;
-
-    pc.onIceCandidate = (RTCIceCandidate candidate) {
-      if (candidate.candidate != null) {
-        _sendJson({
-          'webrtc': 'ice',
-          'candidate': {
-            'candidate': candidate.candidate,
-            'sdpMid': candidate.sdpMid,
-            'sdpMLineIndex': candidate.sdpMLineIndex,
-          },
-        });
+  Future<void> _toggleMusicStream() async {
+    if (_musicBusy) return;
+    if (_isMusicStreaming) {
+      await _stopMusicStream();
+      return;
+    }
+    if (!_micGranted) {
+      final ok = await _checkOrRequestMic();
+      if (!ok) return;
+    }
+    setState(() => _musicBusy = true);
+    try {
+      await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+      final started =
+          await _audioChannel.invokeMethod<bool>('startMusicCapture') ?? false;
+      if (started && mounted) {
+        setState(() => _isMusicStreaming = true);
+        _sendJson({'pressed': true});
       }
-    };
-
-    pc.onTrack = (RTCTrackEvent event) async {
-      event.track.enabled = true;
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        if (mounted) {
-          setState(() {
-            _remoteRenderer.srcObject = _remoteStream;
-            _callStatus = 'Video Call Tersambung';
-          });
-        }
-      } else {
-        _remoteStream ??= await createLocalMediaStream('remote_stream');
-        await _remoteStream!.addTrack(event.track);
-        if (mounted) {
-          setState(() {
-            _remoteRenderer.srcObject = null;
-            _remoteRenderer.srcObject = _remoteStream;
-            _callStatus = 'Video Call Tersambung';
-          });
-        }
-      }
-    };
-
-    pc.onAddStream = (MediaStream stream) {
-      _remoteStream = stream;
-      if (mounted) {
-        setState(() {
-          _remoteRenderer.srcObject = stream;
-          _callStatus = 'Video Call Tersambung';
-        });
-      }
-    };
-
-    pc.onConnectionState = (RTCPeerConnectionState state) {
-      if (!mounted) return;
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        setState(() => _callStatus = 'Video Call Tersambung');
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
-        _hangupCall(notifyPeer: false);
-      }
-    };
-
-    return pc;
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _musicBusy = false);
+    }
   }
 
-  Future<void> _openLocalCameraAndMic() async {
-    await _audioChannel.invokeMethod('stopCapture').catchError((_) {});
-    await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-
-    final stream = await navigator.mediaDevices.getUserMedia({
-      'audio': {
-        'echoCancellation': true,
-        'noiseSuppression': true,
-        'autoGainControl': true,
-      },
-      'video': {
-        'facingMode': 'user',
-        'width': {'ideal': 640},
-        'height': {'ideal': 480},
-        'frameRate': {'ideal': 24},
-      },
-    });
-    _localStream = stream;
-    await Helper.setSpeakerphoneOn(true).catchError((_) {});
+  Future<void> _stopMusicStream() async {
+    await _audioChannel.invokeMethod('stopMusicCapture').catchError((_) {});
     if (mounted) {
-      setState(() {
-        _localRenderer.srcObject = stream;
-        _micMuted = false;
-        _camOff = false;
-      });
+      setState(() => _isMusicStreaming = false);
     }
-  }
-
-  Future<void> _startVideoCall() async {
-    if (!_isConnected || _inCall || _callBusy) return;
-    setState(() {
-      _callBusy = true;
-      _callStatus = 'Membuka kamera & memanggil...';
-    });
-
-    try {
-      await _openLocalCameraAndMic();
-      final pc = await _createRtcConnection();
-      _peerConnection = pc;
-
-      for (final track in _localStream!.getTracks()) {
-        await pc.addTrack(track, _localStream!);
-      }
-
-      final offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      _sendJson({
-        'webrtc': 'offer',
-        'sdp': offer.sdp,
-        'type': offer.type,
-      });
-
-      if (mounted) {
-        setState(() {
-          _inCall = true;
-          _callBusy = false;
-          _callStatus = 'Memanggil lawan bicara...';
-        });
-      }
-    } catch (e) {
-      await _hangupCall(notifyPeer: false);
-      if (mounted) {
-        setState(() {
-          _callBusy = false;
-          _callStatus = 'Gagal mulai video: $e';
-        });
-      }
-    }
-  }
-
-  Future<void> _handleWebRtcSignal(Map<String, dynamic> map) async {
-    final kind = map['webrtc'];
-    if (kind == 'offer') {
-      try {
-        await _hangupCall(notifyPeer: false);
-        if (mounted) {
-          setState(() {
-            _mode = AppMode.video;
-            _localPressed = false;
-            _remotePressed = false;
-            _callBusy = true;
-            _callStatus = 'Menerima panggilan video...';
-          });
-        }
-
-        await _openLocalCameraAndMic();
-        final pc = await _createRtcConnection();
-        _peerConnection = pc;
-
-        for (final track in _localStream!.getTracks()) {
-          await pc.addTrack(track, _localStream!);
-        }
-
-        await pc.setRemoteDescription(
-          RTCSessionDescription(map['sdp'] as String, map['type'] as String),
-        );
-        _remoteDescSet = true;
-        await _flushPendingCandidates();
-
-        final answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        _sendJson({
-          'webrtc': 'answer',
-          'sdp': answer.sdp,
-          'type': answer.type,
-        });
-
-        if (mounted) {
-          setState(() {
-            _inCall = true;
-            _callBusy = false;
-            _callStatus = 'Menyambungkan video...';
-          });
-        }
-      } catch (e) {
-        await _hangupCall(notifyPeer: false);
-        if (mounted) {
-          setState(() => _callStatus = 'Gagal jawab panggilan: $e');
-        }
-      }
-    } else if (kind == 'answer') {
-      final pc = _peerConnection;
-      if (pc == null) return;
-      try {
-        await pc.setRemoteDescription(
-          RTCSessionDescription(map['sdp'] as String, map['type'] as String),
-        );
-        _remoteDescSet = true;
-        await _flushPendingCandidates();
-      } catch (_) {}
-    } else if (kind == 'ice') {
-      final candMap = map['candidate'] as Map<String, dynamic>?;
-      if (candMap == null) return;
-      final candidate = RTCIceCandidate(
-        candMap['candidate'] as String?,
-        candMap['sdpMid'] as String?,
-        candMap['sdpMLineIndex'] as int?,
-      );
-      if (_remoteDescSet && _peerConnection != null) {
-        await _peerConnection!.addCandidate(candidate).catchError((_) {});
-      } else {
-        _pendingCandidates.add(candidate);
-      }
-    } else if (kind == 'hangup') {
-      await _hangupCall(notifyPeer: false);
-      if (mounted) {
-        setState(() => _callStatus = 'Panggilan diakhiri lawan bicara');
-      }
-    }
-  }
-
-  Future<void> _flushPendingCandidates() async {
-    final pc = _peerConnection;
-    if (pc == null) return;
-    for (final c in List<RTCIceCandidate>.from(_pendingCandidates)) {
-      await pc.addCandidate(c).catchError((_) {});
-    }
-    _pendingCandidates.clear();
-  }
-
-  Future<void> _hangupCall({bool notifyPeer = true}) async {
-    if (notifyPeer) {
-      _sendJson({'webrtc': 'hangup'});
-    }
-    _pendingCandidates.clear();
-    _remoteDescSet = false;
-
-    try {
-      await _peerConnection?.close();
-      await _peerConnection?.dispose();
-    } catch (_) {}
-    _peerConnection = null;
-
-    try {
-      if (_localStream != null) {
-        for (final t in _localStream!.getTracks()) {
-          await t.stop();
-        }
-        await _localStream!.dispose();
-      }
-    } catch (_) {}
-    _localStream = null;
-
-    try {
-      await _remoteStream?.dispose();
-    } catch (_) {}
-    _remoteStream = null;
-
-    if (mounted) {
-      setState(() {
-        _localRenderer.srcObject = null;
-        _remoteRenderer.srcObject = null;
-        _inCall = false;
-        _callBusy = false;
-        _micMuted = false;
-        _camOff = false;
-        if (notifyPeer) _callStatus = 'Siap Video Call';
-      });
-    }
-  }
-
-  void _toggleMuteMic() {
-    final stream = _localStream;
-    if (stream == null) return;
-    final nextMuted = !_micMuted;
-    for (final track in stream.getAudioTracks()) {
-      track.enabled = !nextMuted;
-    }
-    setState(() => _micMuted = nextMuted);
-  }
-
-  void _toggleCamera() {
-    final stream = _localStream;
-    if (stream == null) return;
-    final nextOff = !_camOff;
-    for (final track in stream.getVideoTracks()) {
-      track.enabled = !nextOff;
-    }
-    setState(() => _camOff = nextOff);
-  }
-
-  Future<void> _switchCamera() async {
-    final stream = _localStream;
-    if (stream == null) return;
-    final videoTracks = stream.getVideoTracks();
-    if (videoTracks.isNotEmpty) {
-      await Helper.switchCamera(videoTracks.first);
-    }
-  }
-
-  // ==========================================================
-  // CONNECTION & HT CONTROLS
-  // ==========================================================
-
-  void _handleDrop(String msg) {
-    _keepaliveTimer?.cancel();
-    _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    if (!mounted) return;
-    setState(() {
-      _isConnected = false;
-      _isConnecting = false;
-      _remotePressed = false;
-      _statusText = _manualDisconnect ? 'Terputus' : msg;
-    });
-    if (!_manualDisconnect) {
-      _reconnectTimer?.cancel();
-      _reconnectTimer = Timer(const Duration(seconds: 2), () {
-        if (mounted && !_manualDisconnect) {
-          _connectRelay(isRetry: true);
-        }
-      });
-    }
-  }
-
-  Future<void> _closeSocketOnly() async {
-    _keepaliveTimer?.cancel();
-    _keepaliveTimer = null;
-    await _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
-    await _socket?.close().catchError((_) {});
-    _socket = null;
-  }
-
-  Future<void> _disconnectSocket({bool manual = true}) async {
-    _manualDisconnect = manual;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    await _hangupCall(notifyPeer: true);
-    await _closeSocketOnly();
-    if (manual) {
-      _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
-    }
-    if (mounted) {
-      setState(() {
-        _isConnected = false;
-        _isConnecting = false;
-        _remotePressed = false;
-        if (manual) {
-          _statusText = 'Terputus';
-        }
-      });
-    }
+    _sendJson({'pressed': false});
   }
 
   Future<void> _switchMode(AppMode next) async {
@@ -716,14 +368,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     if (_localPressed) {
       await _setPressed(false);
     }
-    if (next == AppMode.voice && _inCall) {
-      await _hangupCall(notifyPeer: true);
+    if (_isMusicStreaming) {
+      await _stopMusicStream();
     }
     setState(() => _mode = next);
   }
 
   Future<void> _setPressed(bool pressed) async {
-    if (_mode != AppMode.voice || _inCall) return;
+    if (_mode != AppMode.voice) return;
     if (pressed && !_micGranted) {
       final ok = await _checkOrRequestMic();
       if (!ok) return;
@@ -785,7 +437,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
                     Expanded(
                       child: Padding(
                         padding: const EdgeInsets.only(top: 12),
-                        child: _buildVideoArea(),
+                        child: _buildMusicArea(),
                       ),
                     ),
                 ],
@@ -820,9 +472,9 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: _ModeChip(
-                  label: 'Video Call',
-                  selected: _mode == AppMode.video,
-                  onTap: () => _switchMode(AppMode.video),
+                  label: 'Stream Musik',
+                  selected: _mode == AppMode.music,
+                  onTap: () => _switchMode(AppMode.music),
                 ),
               ),
             ],
@@ -940,122 +592,80 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
     );
   }
 
-  Widget _buildVideoArea() {
-    return Column(
-      children: [
-        Expanded(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(20),
-            child: Container(
-              width: double.infinity,
-              color: AppTokens.bgPrimaryBtn,
-              child: Stack(
-                children: [
-                  if (_renderersReady && _remoteRenderer.srcObject != null)
-                    RTCVideoView(
-                      _remoteRenderer,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                    )
-                  else
-                    Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Text(
-                          _callStatus,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: AppTokens.inkLight,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ),
-                  if (_renderersReady && _localRenderer.srcObject != null)
-                    Positioned(
-                      top: 12,
-                      right: 12,
-                      width: 100,
-                      height: 144,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color: Colors.white24,
-                              width: 1.5,
-                            ),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: RTCVideoView(
-                            _localRenderer,
-                            mirror: true,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitCover,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+  Widget _buildMusicArea() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: AppTokens.bgSecondaryIdle,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppTokens.borderSubtle),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            _isMusicStreaming ? Icons.graphic_eq_rounded : Icons.music_note_rounded,
+            size: 56,
+            color: _isMusicStreaming
+                ? AppTokens.bgPrimaryPressed
+                : AppTokens.inkDark,
+          ),
+          const SizedBox(height: 16),
+          Text(
+            _isMusicStreaming
+                ? 'Sedang Streaming Audio Internal'
+                : 'Stream Musik Jarak Jauh',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: AppTokens.inkDark,
             ),
           ),
-        ),
-        const SizedBox(height: 14),
-        if (!_inCall)
+          const SizedBox(height: 8),
+          Text(
+            _isMusicStreaming
+                ? 'Suara dari pemutar musik / YouTube di HP ini sedang dikirim ke room.'
+                : 'Putar musik di HP ini lalu tekan tombol di bawah untuk mengirim suaranya ke HP lain di room yang sama.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 13,
+              color: AppTokens.inkMuted,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
-            height: 48,
+            height: 52,
             child: ElevatedButton.icon(
-              onPressed: (!_isConnected || _callBusy) ? null : _startVideoCall,
-              icon: const Icon(Icons.videocam_rounded, size: 20),
-              label: Text(
-                _callBusy ? 'Menyiapkan...' : 'Mulai Video Call',
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              onPressed: _musicBusy ? null : _toggleMusicStream,
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppTokens.bgPrimaryBtn,
+                backgroundColor: _isMusicStreaming
+                    ? AppTokens.bgPrimaryPressed
+                    : AppTokens.bgPrimaryBtn,
                 foregroundColor: AppTokens.inkLight,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
               ),
+              icon: Icon(
+                _isMusicStreaming ? Icons.stop_rounded : Icons.play_arrow_rounded,
+              ),
+              label: Text(
+                _musicBusy
+                    ? 'Meminta izin...'
+                    : (_isMusicStreaming ? 'Stop Stream Musik' : 'Mulai Stream Musik'),
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
-          )
-        else
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _VideoCtrlBtn(
-                icon: _micMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
-                active: _micMuted,
-                onTap: _toggleMuteMic,
-              ),
-              _VideoCtrlBtn(
-                icon: _camOff
-                    ? Icons.videocam_off_rounded
-                    : Icons.videocam_rounded,
-                active: _camOff,
-                onTap: _toggleCamera,
-              ),
-              _VideoCtrlBtn(
-                icon: Icons.cameraswitch_rounded,
-                active: false,
-                onTap: _switchCamera,
-              ),
-              _VideoCtrlBtn(
-                icon: Icons.call_end_rounded,
-                active: true,
-                danger: true,
-                onTap: () => _hangupCall(notifyPeer: true),
-              ),
-            ],
           ),
-      ],
+        ],
+      ),
     );
   }
 }
