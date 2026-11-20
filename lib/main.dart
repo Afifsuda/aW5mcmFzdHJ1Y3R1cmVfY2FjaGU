@@ -330,6 +330,55 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
   }
 
   // ==========================================================
+  Future<void> _closeSocketOnly() async {
+    _keepaliveTimer?.cancel();
+    _keepaliveTimer = null;
+    final ws = _socket;
+    _socket = null;
+    if (ws != null) {
+      try {
+        await ws.close();
+      } catch (_) {}
+    }
+  }
+
+  void _handleDrop(String reason) {
+    _closeSocketOnly();
+    _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+    if (!mounted) return;
+    setState(() {
+      _isConnected = false;
+      _isConnecting = false;
+      _remotePressed = false;
+      _statusText = reason;
+    });
+    if (!_manualDisconnect) {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = Timer(const Duration(seconds: 2), () {
+        if (mounted && !_manualDisconnect && !_isConnected && !_isConnecting) {
+          _connect();
+        }
+      });
+    }
+  }
+
+  Future<void> _disconnectSocket({bool manual = false}) async {
+    _manualDisconnect = manual;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await _closeSocketOnly();
+    _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
+    _audioChannel.invokeMethod('stopKeepAlive').catchError((_) {});
+    if (mounted) {
+      setState(() {
+        _isConnected = false;
+        _isConnecting = false;
+        _remotePressed = false;
+        if (manual) _statusText = 'Terputus';
+      });
+    }
+  }
+
   Future<void> _toggleMusicStream() async {
     if (_musicBusy) return;
     if (_isMusicStreaming) {

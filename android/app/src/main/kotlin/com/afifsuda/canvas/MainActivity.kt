@@ -369,9 +369,13 @@ class MainActivity : FlutterActivity() {
             if (resultCode == Activity.RESULT_OK && data != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 val projection = mgr.getMediaProjection(resultCode, data)
-                mediaProjection = projection
-                val started = startInternalAudioCapture(projection)
-                pendingMusicResult?.success(started)
+                if (projection != null) {
+                    mediaProjection = projection
+                    val started = startInternalAudioCapture(projection)
+                    pendingMusicResult?.success(started)
+                } else {
+                    pendingMusicResult?.success(false)
+                }
             } else {
                 pendingMusicResult?.success(false)
             }
