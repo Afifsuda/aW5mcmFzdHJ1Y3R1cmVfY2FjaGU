@@ -317,11 +317,14 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
       final map = jsonDecode(raw) as Map<String, dynamic>;
       if (map.containsKey('pressed')) {
         final pressed = map['pressed'] == true;
+        final sampleRate = (map['sampleRate'] as num?)?.toInt() ?? 16000;
         if (mounted && _remotePressed != pressed) {
           setState(() => _remotePressed = pressed);
         }
         if (pressed && !_localPressed && !_isMusicStreaming) {
-          _audioChannel.invokeMethod('startPlayback').catchError((_) {});
+          _audioChannel
+              .invokeMethod('startPlayback', sampleRate)
+              .catchError((_) {});
         } else if (!pressed) {
           _audioChannel.invokeMethod('stopPlayback').catchError((_) {});
         }
@@ -396,7 +399,7 @@ class _VoiceNodeScreenState extends State<VoiceNodeScreen> {
           await _audioChannel.invokeMethod<bool>('startMusicCapture') ?? false;
       if (started && mounted) {
         setState(() => _isMusicStreaming = true);
-        _sendJson({'pressed': true});
+        _sendJson({'pressed': true, 'sampleRate': 48000});
       }
     } catch (_) {
     } finally {

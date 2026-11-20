@@ -35,6 +35,8 @@ class MainActivity : FlutterActivity() {
         private const val REQ_MEDIA_PROJECTION = 1003
         private const val SAMPLE_RATE = 16000
         private const val CHUNK_BYTES = 1280 // 40ms @ 16kHz 16-bit mono
+        private const val MUSIC_SAMPLE_RATE = 48000
+        private const val MUSIC_CHUNK_BYTES = 3840 // 40ms @ 48kHz 16-bit mono
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -156,7 +158,8 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "startPlayback" -> {
-                        startAudioPlayback()
+                        val rate = (call.arguments as? Int) ?: SAMPLE_RATE
+                        startAudioPlayback(rate)
                         result.success(true)
                     }
                     "writePlayback" -> {
@@ -304,26 +307,44 @@ class MainActivity : FlutterActivity() {
         audioRecord = null
     }
 
-    private fun startAudioPlayback() {
+    private var currentPlaybackRate = SAMPLE_RATE
+
+    private fun startAudioPlayback(sampleRate: Int = SAMPLE_RATE) {
         synchronized(playbackLock) {
-            if (audioTrack != null) return
+            if (audioTrack != null) {
+                if (currentPlaybackRate == sampleRate) return
+                val old = audioTrack
+                audioTrack = null
+                try {
+                    old?.pause()
+                    old?.flush()
+                    old?.release()
+                } catch (_: Throwable) {
+                }
+            }
+            currentPlaybackRate = sampleRate
+            val isMusic = sampleRate >= 44100
+            val chunkBytes = if (isMusic) MUSIC_CHUNK_BYTES else CHUNK_BYTES
             val minBuf = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE,
+                sampleRate,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
-            val bufferSize = maxOf(minBuf, CHUNK_BYTES * 4)
+            val bufferSize = maxOf(minBuf, chunkBytes * 4)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .setContentType(
+                            if (isMusic) AudioAttributes.CONTENT_TYPE_MUSIC
+                            else AudioAttributes.CONTENT_TYPE_SPEECH
+                        )
                         .build()
                 )
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE)
+                        .setSampleRate(sampleRate)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
@@ -438,18 +459,18 @@ class MainActivity : FlutterActivity() {
             .build()
 
         val minBuf = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
+            MUSIC_SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        val bufferSize = maxOf(minBuf, CHUNK_BYTES * 4)
+        val bufferSize = maxOf(minBuf, MUSIC_CHUNK_BYTES * 4)
 
         val record = try {
             AudioRecord.Builder()
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE)
+                        .setSampleRate(MUSIC_SAMPLE_RATE)
                         .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                         .build()
                 )
@@ -470,7 +491,7 @@ class MainActivity : FlutterActivity() {
         record.startRecording()
 
         captureThread = Thread {
-            val buf = ByteArray(CHUNK_BYTES)
+            val buf = ByteArray(MUSIC_CHUNK_BYTES)
             while (isCapturing) {
                 val read = record.read(buf, 0, buf.size)
                 if (read > 0) {
