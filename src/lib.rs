@@ -87,6 +87,7 @@ extern "C" {
     fn glUseProgram(program: u32);
     fn glGetUniformLocation(program: u32, name: *const u8) -> i32;
     fn glUniform1f(location: i32, v0: f32);
+    fn glUniform1i(location: i32, v0: i32);
     fn glUniform2f(location: i32, v0: f32, v1: f32);
     fn glGenVertexArrays(n: i32, arrays: *mut u32);
     fn glBindVertexArray(array: u32);
@@ -116,12 +117,38 @@ uniform vec2 uTouch;
 uniform float uPress;
 uniform float uToggle;
 uniform float uRipple;
+uniform int uFps;
 
 out vec4 fragColor;
 
 float sdRoundBox(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float sdSegment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+float sdDigit(vec2 p, int d, vec2 sz, float thick) {
+    int masks[10] = int[10](0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F);
+    int m = masks[clamp(d, 0, 9)];
+    float hw = sz.x * 0.5;
+    float hh = sz.y * 0.5;
+    float gap = thick * 1.15;
+    float dist = 1e5;
+
+    if ((m & 1) != 0)  dist = min(dist, sdSegment(p, vec2(-hw + gap, -hh), vec2(hw - gap, -hh))); // top
+    if ((m & 2) != 0)  dist = min(dist, sdSegment(p, vec2(hw, -hh + gap), vec2(hw, -gap)));       // top-right
+    if ((m & 4) != 0)  dist = min(dist, sdSegment(p, vec2(hw, gap), vec2(hw, hh - gap)));         // bot-right
+    if ((m & 8) != 0)  dist = min(dist, sdSegment(p, vec2(-hw + gap, hh), vec2(hw - gap, hh)));   // bottom
+    if ((m & 16) != 0) dist = min(dist, sdSegment(p, vec2(-hw, gap), vec2(-hw, hh - gap)));       // bot-left
+    if ((m & 32) != 0) dist = min(dist, sdSegment(p, vec2(-hw, -hh + gap), vec2(-hw, -gap)));     // top-left
+    if ((m & 64) != 0) dist = min(dist, sdSegment(p, vec2(-hw + gap, 0.0), vec2(hw - gap, 0.0))); // mid
+
+    return dist - thick;
 }
 
 void main() {
@@ -181,6 +208,53 @@ void main() {
     float btnAlpha = 1.0 - smoothstep(-0.75, 0.75, d);
     col = mix(col, btnCol, btnAlpha);
 
+    // --- Minimalist Top FPS Pill ---
+    float unit = clamp(minDim * 0.032, 22.0, 38.0);
+    vec2 pillCenter = vec2(uRes.x * 0.5, max(uRes.y * 0.08, 120.0));
+    vec2 pp = px - pillCenter;
+    vec2 pillHalf = vec2(unit * 2.55, unit * 0.72);
+    float dPill = sdRoundBox(pp, pillHalf, pillHalf.y);
+
+    if (dPill < 8.0) {
+        vec3 pillBg = vec3(0.9255, 0.9255, 0.9098); // #ECECE8
+        float pillAlpha = 1.0 - smoothstep(-0.75, 0.75, dPill);
+        float pillBorder = 1.0 - smoothstep(0.0, 1.4, abs(dPill));
+        vec3 pillCol = mix(pillBg, vec3(0.094, 0.094, 0.086), pillBorder * 0.10);
+
+        // Status dot (green >=55, amber 30-54, red <30)
+        vec2 dotPos = vec2(-pillHalf.x + pillHalf.y * 0.85, 0.0);
+        float dDot = length(pp - dotPos) - (unit * 0.14);
+        vec3 dotCol = (uFps >= 55) ? vec3(0.13, 0.72, 0.38)
+                    : (uFps >= 30) ? vec3(0.92, 0.65, 0.12)
+                                   : vec3(0.90, 0.28, 0.15);
+        pillCol = mix(pillCol, dotCol, 1.0 - smoothstep(-0.75, 0.75, dDot));
+
+        // 7-segment FPS digits (up to 3 digits)
+        int fpsClamped = clamp(uFps, 0, 999);
+        int d0 = (fpsClamped / 100) % 10;
+        int d1 = (fpsClamped / 10) % 10;
+        int d2 = fpsClamped % 10;
+
+        vec2 digSz = vec2(unit * 0.42, unit * 0.76);
+        float thick = unit * 0.068;
+        float stepX = unit * 0.66;
+        float startX = -unit * 0.15;
+
+        float dText = 1e5;
+        if (fpsClamped >= 100) {
+            dText = min(dText, sdDigit(pp - vec2(startX, 0.0), d0, digSz, thick));
+        }
+        if (fpsClamped >= 10) {
+            dText = min(dText, sdDigit(pp - vec2(startX + stepX, 0.0), d1, digSz, thick));
+        }
+        dText = min(dText, sdDigit(pp - vec2(startX + stepX * 2.0, 0.0), d2, digSz, thick));
+
+        float textAlpha = 1.0 - smoothstep(-0.75, 0.75, dText);
+        pillCol = mix(pillCol, idleCol, textAlpha * 0.90);
+
+        col = mix(col, pillCol, pillAlpha);
+    }
+
     fragColor = vec4(col, 1.0);
 }
 \0";
@@ -197,6 +271,7 @@ struct GlState {
     u_press: i32,
     u_toggle: i32,
     u_ripple: i32,
+    u_fps: i32,
     width: i32,
     height: i32,
 }
@@ -289,6 +364,7 @@ impl GlState {
             u_press: loc("uPress"),
             u_toggle: loc("uToggle"),
             u_ripple: loc("uRipple"),
+            u_fps: loc("uFps"),
             width,
             height,
         })
@@ -309,7 +385,7 @@ impl GlState {
         }
     }
 
-    unsafe fn draw(&self, touch: [f32; 2], press: f32, toggle: f32, ripple: f32) {
+    unsafe fn draw(&self, touch: [f32; 2], press: f32, toggle: f32, ripple: f32, fps: i32) {
         if self.surface.is_null() {
             return;
         }
@@ -321,6 +397,7 @@ impl GlState {
         glUniform1f(self.u_press, press);
         glUniform1f(self.u_toggle, toggle);
         glUniform1f(self.u_ripple, ripple);
+        glUniform1i(self.u_fps, fps);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         eglSwapBuffers(self.display, self.surface);
     }
@@ -380,15 +457,13 @@ fn android_main(app: AndroidApp) {
     let mut ripple_anim: f32 = 0.0;
     let mut touch_pos: [f32; 2] = [0.0, 0.0];
     let mut last_tick = Instant::now();
+    let mut fps_timer = Instant::now();
+    let mut frame_count: u32 = 0;
+    let mut current_fps: i32 = 60;
 
     while running {
-        let animating = (press_anim - if is_pressed { 1.0 } else { 0.0 }).abs() > 0.002
-            || (toggle_anim - if is_toggled { 1.0 } else { 0.0 }).abs() > 0.002
-            || (is_pressed && ripple_anim < 0.998)
-            || (!is_pressed && ripple_anim > 0.002);
-
-        let timeout = if animating || needs_redraw {
-            Some(Duration::from_millis(8))
+        let timeout = if has_window {
+            Some(Duration::ZERO)
         } else {
             None
         };
@@ -495,14 +570,22 @@ fn android_main(app: AndroidApp) {
             || (toggle_anim - target_toggle).abs() > 0.002
             || (ripple_anim - target_ripple).abs() > 0.002;
 
-        if has_window && (needs_redraw || still_animating) {
+        if has_window {
             if let Some(ref state) = gl {
                 unsafe {
-                    state.draw(touch_pos, press_anim, toggle_anim, ripple_anim);
+                    state.draw(touch_pos, press_anim, toggle_anim, ripple_anim, current_fps);
                 }
+            }
+            frame_count += 1;
+            let fps_elapsed = now.duration_since(fps_timer).as_secs_f32();
+            if fps_elapsed >= 0.35 {
+                current_fps = (frame_count as f32 / fps_elapsed).round() as i32;
+                frame_count = 0;
+                fps_timer = now;
             }
             needs_redraw = false;
         }
+        let _ = (needs_redraw, still_animating);
     }
 
     if let Some(ref mut state) = gl {
