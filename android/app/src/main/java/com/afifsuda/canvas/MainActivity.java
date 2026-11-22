@@ -55,6 +55,7 @@ import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -133,6 +134,7 @@ public class MainActivity extends NativeActivity {
 
     private final Object historyLock = new Object();
     private JSONArray chatHistory = new JSONArray();
+    private String deviceId = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -144,6 +146,7 @@ public class MainActivity extends NativeActivity {
         super.onCreate(savedInstanceState);
         density = getResources().getDisplayMetrics().density;
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        deviceId = getOrCreateDeviceId();
 
         fpsLabel = new TextView(this);
         fpsLabel.setText("60fps");
@@ -396,14 +399,27 @@ public class MainActivity extends NativeActivity {
                         } else if (opcode == 0x1) {
                             String msg = new String(payload, StandardCharsets.UTF_8);
                             try {
-                                JSONObject obj = new JSONObject(msg);
-                                if ("chat".equals(obj.optString("type"))) {
+                                JSONObject obj = new JSONObject();
+                                String type = obj.optString("type");
+                                obj = new JSONObject(msg);
+                                type = obj.optString("type");
+                                if ("chat".equals(type)) {
                                     String txt = obj.optString("text", "").trim();
+                                    String sid = obj.optString("senderId", "");
+                                    long ts = obj.optLong("ts", System.currentTimeMillis());
+                                    boolean self = !sid.isEmpty() && deviceId.equals(sid);
                                     if (!txt.isEmpty()) {
                                         recordUsage(0, 0, 1);
-                                        saveChatMessage(txt, false);
-                                        addChatBubble(txt, false);
+                                        saveChatMessage(txt, self, sid, ts);
+                                        addChatBubble(txt, self);
                                     }
+                                } else if ("history".equals(type)) {
+                                    JSONArray items = obj.optJSONArray("items");
+                                    if (items != null) {
+                                        syncHistoryFromServer(items);
+                                    }
+                                } else if ("clear_history".equals(type)) {
+                                    clearLocalHistory();
                                 }
                             } catch (Throwable ignored) {
                             }
@@ -565,13 +581,16 @@ public class MainActivity extends NativeActivity {
             if (!text.isEmpty()) {
                 msgInput.setText("");
                 nativeSetTargetCapHeight(52f);
+                long nowTs = System.currentTimeMillis();
                 recordUsage(0, 1, 0);
-                saveChatMessage(text, true);
+                saveChatMessage(text, true, deviceId, nowTs);
                 addChatBubble(text, true);
                 try {
                     JSONObject obj = new JSONObject();
                     obj.put("type", "chat");
                     obj.put("text", text);
+                    obj.put("senderId", deviceId);
+                    obj.put("ts", nowTs);
                     sendWsFrame(0x1, obj.toString().getBytes(StandardCharsets.UTF_8));
                 } catch (Throwable ignored) {
                 }
@@ -636,14 +655,76 @@ public class MainActivity extends NativeActivity {
         });
     }
 
-    private void saveChatMessage(final String text, final boolean isSelf) {
+    private String getOrCreateDeviceId() {
+        SharedPreferences prefs = getSharedPreferences("cf_usage", Context.MODE_PRIVATE);
+        String id = prefs.getString("device_id", "");
+        if (id == null || id.isEmpty()) {
+            id = UUID.randomUUID().toString();
+            prefs.edit().putString("device_id", id).apply();
+        }
+        return id;
+    }
+
+    private void syncHistoryFromServer(final JSONArray serverItems) {
+        executor.execute(() -> {
+            synchronized (historyLock) {
+                try {
+                    JSONArray normalized = new JSONArray();
+                    for (int i = 0; i < serverItems.length(); i++) {
+                        JSONObject s = serverItems.optJSONObject(i);
+                        if (s == null) continue;
+                        String txt = s.optString("text", "").trim();
+                        if (txt.isEmpty()) continue;
+                        String sid = s.optString("senderId", "");
+                        long ts = s.optLong("ts", 0);
+                        boolean self = !sid.isEmpty() && deviceId.equals(sid);
+                        JSONObject item = new JSONObject();
+                        item.put("text", txt);
+                        item.put("self", self);
+                        item.put("senderId", sid);
+                        item.put("ts", ts);
+                        normalized.put(item);
+                    }
+                    chatHistory = normalized;
+                    File f = new File(getFilesDir(), "chat_history.json");
+                    try (FileOutputStream fos = new FileOutputStream(f)) {
+                        fos.write(chatHistory.toString().getBytes(StandardCharsets.UTF_8));
+                    }
+                    uiHandler.post(() -> {
+                        if (chatContainer != null) chatContainer.removeAllViews();
+                        for (int i = 0; i < normalized.length(); i++) {
+                            JSONObject item = normalized.optJSONObject(i);
+                            if (item != null) {
+                                addChatBubble(item.optString("text", ""), item.optBoolean("self", false));
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
+    private void clearLocalHistory() {
+        synchronized (historyLock) {
+            chatHistory = new JSONArray();
+            File f = new File(getFilesDir(), "chat_history.json");
+            if (f.exists()) f.delete();
+        }
+        uiHandler.post(() -> {
+            if (chatContainer != null) chatContainer.removeAllViews();
+        });
+    }
+
+    private void saveChatMessage(final String text, final boolean isSelf, final String senderId, final long ts) {
         executor.execute(() -> {
             synchronized (historyLock) {
                 try {
                     JSONObject item = new JSONObject();
                     item.put("text", text);
                     item.put("self", isSelf);
-                    item.put("ts", System.currentTimeMillis());
+                    item.put("senderId", senderId);
+                    item.put("ts", ts);
                     chatHistory.put(item);
                     while (chatHistory.length() > 500) {
                         chatHistory.remove(0);
@@ -689,12 +770,13 @@ public class MainActivity extends NativeActivity {
                     .setMessage(info)
                     .setPositiveButton("Tutup", null)
                     .setNeutralButton("Hapus Chat", (d, w) -> {
-                        synchronized (historyLock) {
-                            chatHistory = new JSONArray();
-                            File f = new File(getFilesDir(), "chat_history.json");
-                            if (f.exists()) f.delete();
+                        clearLocalHistory();
+                        try {
+                            JSONObject clr = new JSONObject();
+                            clr.put("type", "clear_history");
+                            sendWsFrame(0x1, clr.toString().getBytes(StandardCharsets.UTF_8));
+                        } catch (Throwable ignored) {
                         }
-                        if (chatContainer != null) chatContainer.removeAllViews();
                         Toast.makeText(this, "Riwayat chat dihapus", Toast.LENGTH_SHORT).show();
                     })
                     .show();
