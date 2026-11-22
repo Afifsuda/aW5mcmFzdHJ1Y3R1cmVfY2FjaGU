@@ -1061,12 +1061,14 @@ public class MainActivity extends NativeActivity {
     }
 
     private void closeModal() {
-        if (modalRoot != null) {
-            modalRoot.setVisibility(View.GONE);
-        }
         nativeSetModalOpen(false);
+        if (modalRoot != null) {
+            modalRoot.animate().alpha(0.0f).setDuration(90).withEndAction(() -> {
+                if (modalRoot != null) modalRoot.setVisibility(View.GONE);
+            }).start();
+        }
         if (chatScroll != null) {
-            chatScroll.animate().alpha(1.0f).setDuration(150).start();
+            chatScroll.animate().alpha(1.0f).setDuration(140).start();
         }
     }
 
@@ -1223,8 +1225,11 @@ public class MainActivity extends NativeActivity {
                 modalCard.addView(row);
 
                 if (chatScroll != null) {
-                    chatScroll.animate().alpha(0.12f).setDuration(150).start();
+                    chatScroll.animate().alpha(0.0f).setDuration(80).start();
                 }
+                modalRoot.setAlpha(0.0f);
+                modalCard.setScaleX(0.94f);
+                modalCard.setScaleY(0.94f);
                 modalRoot.setVisibility(View.VISIBLE);
                 modalCard.post(() -> {
                     int[] loc = new int[2];
@@ -1233,6 +1238,8 @@ public class MainActivity extends NativeActivity {
                     float hh = modalCard.getHeight() * 0.5f;
                     nativeSetModalBounds(loc[0] + hw, loc[1] + hh, hw, hh);
                     nativeSetModalOpen(true);
+                    modalRoot.animate().alpha(1.0f).setDuration(100).start();
+                    modalCard.animate().scaleX(1.0f).scaleY(1.0f).setDuration(110).start();
                 });
             } catch (Throwable ignored) {
             }

@@ -1189,9 +1189,9 @@ fn android_main(app: AndroidApp) {
         btn_press_val += ((if btn_pressed { 1.0 } else { 0.0 }) - btn_press_val) * (dt * 18.0).min(1.0);
         focus_val += (focused - focus_val) * (dt * 12.0).min(1.0);
         let target_modal = if MODAL_OPEN.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
-        modal_open_val += (target_modal - modal_open_val) * (dt * 18.0).min(1.0);
-        if modal_open_val < 0.003 && target_modal == 0.0 {
-            modal_open_val = 0.0;
+        modal_open_val += (target_modal - modal_open_val) * (dt * 28.0).min(1.0);
+        if (target_modal - modal_open_val).abs() < 0.005 {
+            modal_open_val = target_modal;
         }
         plus_pulse_val *= (0.86_f32).powf(dt * 60.0);
         send_pulse_val *= (0.86_f32).powf(dt * 60.0);
