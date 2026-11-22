@@ -48,14 +48,22 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -75,6 +83,11 @@ public class MainActivity extends NativeActivity {
 
     private static final String RELAY_HOST = "aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev";
     private static final String RELAY_PATH = "/?room=1234";
+    private static final int LOCAL_PORT = 8080;
+
+    private static final String MODE_HOST = "host";
+    private static final String MODE_CLIENT = "client";
+    private static final String MODE_CLOUDFLARE = "cloudflare";
 
     private static final String[] WALLPAPERS = {
         "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1080&q=85",
@@ -126,15 +139,26 @@ public class MainActivity extends NativeActivity {
     private int lastLeft = -1, lastTop = -1, lastWidth = -1, lastHeight = -1;
     private int lastChatHeight = -1;
 
-    private volatile boolean wsRunning = true;
+    private volatile boolean appRunning = true;
     private volatile boolean wsConnected = false;
-    private volatile SSLSocket wsSocket;
+    private volatile Socket wsClientSocket;
     private volatile OutputStream wsOut;
-    private Thread wsThread;
+    private Thread netThread;
+
+    private volatile ServerSocket hostServerSocket;
+    private final CopyOnWriteArrayList<HostPeer> hostPeers = new CopyOnWriteArrayList<>();
 
     private final Object historyLock = new Object();
     private JSONArray chatHistory = new JSONArray();
     private String deviceId = "";
+    private String netMode = MODE_HOST;
+    private String hostIp = "192.168.1.2";
+
+    private static class HostPeer {
+        final Socket socket;
+        final OutputStream out;
+        HostPeer(Socket s, OutputStream o) { this.socket = s; this.out = o; }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -146,7 +170,11 @@ public class MainActivity extends NativeActivity {
         super.onCreate(savedInstanceState);
         density = getResources().getDisplayMetrics().density;
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+
+        SharedPreferences prefs = getSharedPreferences("cf_usage", Context.MODE_PRIVATE);
         deviceId = getOrCreateDeviceId();
+        netMode = prefs.getString("net_mode", MODE_HOST);
+        hostIp = prefs.getString("host_ip", "192.168.1.2");
 
         fpsLabel = new TextView(this);
         fpsLabel.setText("60fps");
@@ -220,7 +248,7 @@ public class MainActivity extends NativeActivity {
             }
         });
 
-        startWebSocketLoop();
+        restartNetwork();
     }
 
     private void attachOverlays() {
@@ -329,22 +357,171 @@ public class MainActivity extends NativeActivity {
         });
     }
 
-    private void startWebSocketLoop() {
-        wsThread = new Thread(() -> {
-            while (wsRunning) {
+    private synchronized void stopNetwork() {
+        wsConnected = false;
+        wsOut = null;
+        try { if (wsClientSocket != null) wsClientSocket.close(); } catch (Throwable ignored) {}
+        wsClientSocket = null;
+        try { if (hostServerSocket != null) hostServerSocket.close(); } catch (Throwable ignored) {}
+        hostServerSocket = null;
+        for (HostPeer p : hostPeers) {
+            try { p.socket.close(); } catch (Throwable ignored) {}
+        }
+        hostPeers.clear();
+        if (netThread != null) {
+            netThread.interrupt();
+            netThread = null;
+        }
+    }
+
+    private synchronized void restartNetwork() {
+        stopNetwork();
+        if (!appRunning) return;
+        if (MODE_HOST.equals(netMode)) {
+            startHostServerLoop();
+        } else {
+            startClientLoop();
+        }
+    }
+
+    private void startHostServerLoop() {
+        netThread = new Thread(() -> {
+            try {
+                ServerSocket ss = new ServerSocket(LOCAL_PORT);
+                hostServerSocket = ss;
+                wsConnected = true;
+                while (appRunning && MODE_HOST.equals(netMode) && !ss.isClosed()) {
+                    Socket client = ss.accept();
+                    new Thread(() -> handleHostPeer(client), "AgyHostPeer").start();
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                wsConnected = false;
+            }
+        }, "AgyHostServer");
+        netThread.start();
+    }
+
+    private void handleHostPeer(Socket socket) {
+        HostPeer peer = null;
+        try {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            OutputStream out = socket.getOutputStream();
+
+            String secKey = null;
+            String line;
+            while ((line = readHttpLine(in)) != null && !line.isEmpty()) {
+                if (line.toLowerCase(Locale.US).startsWith("sec-websocket-key:")) {
+                    secKey = line.substring(line.indexOf(':') + 1).trim();
+                }
+            }
+            if (secKey == null) {
+                socket.close();
+                return;
+            }
+
+            String accept = Base64.encodeToString(
+                MessageDigest.getInstance("SHA-1").digest(
+                    (secKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes(StandardCharsets.UTF_8)
+                ),
+                Base64.NO_WRAP
+            );
+            String resp = "HTTP/1.1 101 Switching Protocols\r\n"
+                + "Upgrade: websocket\r\n"
+                + "Connection: Upgrade\r\n"
+                + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+            out.write(resp.getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+
+            peer = new HostPeer(socket, out);
+            hostPeers.add(peer);
+
+            // Send existing history to newly joined client
+            JSONArray copy;
+            synchronized (historyLock) {
+                copy = new JSONArray(chatHistory.toString());
+            }
+            if (copy.length() > 0) {
+                JSONObject hist = new JSONObject();
+                hist.put("type", "history");
+                hist.put("items", copy);
+                writeRawFrame(out, 0x1, hist.toString().getBytes(StandardCharsets.UTF_8), false);
+            }
+
+            while (appRunning && MODE_HOST.equals(netMode) && !socket.isClosed()) {
+                int b0 = in.readUnsignedByte();
+                int b1 = in.readUnsignedByte();
+                int opcode = b0 & 0x0F;
+                boolean masked = (b1 & 0x80) != 0;
+                long len = b1 & 0x7F;
+                if (len == 126) len = in.readUnsignedShort();
+                else if (len == 127) len = in.readLong();
+                byte[] mask = new byte[4];
+                if (masked) in.readFully(mask);
+                if (len > 1024 * 1024) break;
+
+                byte[] payload = new byte[(int) len];
+                in.readFully(payload);
+                if (masked) {
+                    for (int i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+                }
+
+                if (opcode == 0x8) break;
+                else if (opcode == 0x9) writeRawFrame(out, 0xA, payload, false);
+                else if (opcode == 0x1) {
+                    String msg = new String(payload, StandardCharsets.UTF_8);
+                    handleIncomingJson(msg);
+                    broadcastFromHost(payload, peer);
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (peer != null) hostPeers.remove(peer);
+            try { socket.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void broadcastFromHost(byte[] payload, HostPeer exclude) {
+        for (HostPeer p : hostPeers) {
+            if (p == exclude) continue;
+            try {
+                writeRawFrame(p.out, 0x1, payload, false);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void startClientLoop() {
+        final String modeSnapshot = netMode;
+        final String ipSnapshot = hostIp;
+        netThread = new Thread(() -> {
+            while (appRunning && modeSnapshot.equals(netMode)) {
                 try {
-                    SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
-                    SSLSocket socket = (SSLSocket) factory.createSocket(RELAY_HOST, 443);
-                    socket.setSoTimeout(0);
-                    socket.startHandshake();
+                    Socket socket;
+                    String hostHeader;
+                    String path;
+                    if (MODE_CLOUDFLARE.equals(modeSnapshot)) {
+                        SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                        SSLSocket ssl = (SSLSocket) factory.createSocket(RELAY_HOST, 443);
+                        ssl.setSoTimeout(0);
+                        ssl.startHandshake();
+                        socket = ssl;
+                        hostHeader = RELAY_HOST;
+                        path = RELAY_PATH;
+                    } else {
+                        socket = new Socket(ipSnapshot, LOCAL_PORT);
+                        socket.setSoTimeout(0);
+                        hostHeader = ipSnapshot + ":" + LOCAL_PORT;
+                        path = "/";
+                    }
 
                     byte[] keyBytes = new byte[16];
                     rng.nextBytes(keyBytes);
                     String wsKey = Base64.encodeToString(keyBytes, Base64.NO_WRAP);
 
                     OutputStream out = socket.getOutputStream();
-                    String req = "GET " + RELAY_PATH + " HTTP/1.1\r\n"
-                        + "Host: " + RELAY_HOST + "\r\n"
+                    String req = "GET " + path + " HTTP/1.1\r\n"
+                        + "Host: " + hostHeader + "\r\n"
                         + "Upgrade: websocket\r\n"
                         + "Connection: Upgrade\r\n"
                         + "Sec-WebSocket-Key: " + wsKey + "\r\n"
@@ -360,26 +537,23 @@ public class MainActivity extends NativeActivity {
                         continue;
                     }
                     String line;
-                    while ((line = readHttpLine(in)) != null && !line.isEmpty()) {
-                        // Consume headers
-                    }
+                    while ((line = readHttpLine(in)) != null && !line.isEmpty()) {}
 
-                    wsSocket = socket;
+                    wsClientSocket = socket;
                     wsOut = out;
                     wsConnected = true;
-                    recordUsage(1, 0, 0);
+                    if (MODE_CLOUDFLARE.equals(modeSnapshot)) {
+                        recordUsage(1, 0, 0);
+                    }
 
-                    while (wsRunning) {
+                    while (appRunning && modeSnapshot.equals(netMode)) {
                         int b0 = in.readUnsignedByte();
                         int b1 = in.readUnsignedByte();
                         int opcode = b0 & 0x0F;
                         boolean masked = (b1 & 0x80) != 0;
                         long len = b1 & 0x7F;
-                        if (len == 126) {
-                            len = in.readUnsignedShort();
-                        } else if (len == 127) {
-                            len = in.readLong();
-                        }
+                        if (len == 126) len = in.readUnsignedShort();
+                        else if (len == 127) len = in.readLong();
                         byte[] mask = new byte[4];
                         if (masked) in.readFully(mask);
                         if (len > 1024 * 1024) break;
@@ -387,60 +561,52 @@ public class MainActivity extends NativeActivity {
                         byte[] payload = new byte[(int) len];
                         in.readFully(payload);
                         if (masked) {
-                            for (int i = 0; i < payload.length; i++) {
-                                payload[i] ^= mask[i % 4];
-                            }
+                            for (int i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
                         }
 
-                        if (opcode == 0x8) {
-                            break;
-                        } else if (opcode == 0x9) {
-                            sendWsFrame(0xA, payload);
-                        } else if (opcode == 0x1) {
-                            String msg = new String(payload, StandardCharsets.UTF_8);
-                            try {
-                                JSONObject obj = new JSONObject();
-                                String type = obj.optString("type");
-                                obj = new JSONObject(msg);
-                                type = obj.optString("type");
-                                if ("chat".equals(type)) {
-                                    String txt = obj.optString("text", "").trim();
-                                    String sid = obj.optString("senderId", "");
-                                    long ts = obj.optLong("ts", System.currentTimeMillis());
-                                    boolean self = !sid.isEmpty() && deviceId.equals(sid);
-                                    if (!txt.isEmpty()) {
-                                        recordUsage(0, 0, 1);
-                                        saveChatMessage(txt, self, sid, ts);
-                                        addChatBubble(txt, self);
-                                    }
-                                } else if ("history".equals(type)) {
-                                    JSONArray items = obj.optJSONArray("items");
-                                    if (items != null) {
-                                        syncHistoryFromServer(items);
-                                    }
-                                } else if ("clear_history".equals(type)) {
-                                    clearLocalHistory();
-                                }
-                            } catch (Throwable ignored) {
-                            }
+                        if (opcode == 0x8) break;
+                        else if (opcode == 0x9) sendWsFrame(0xA, payload);
+                        else if (opcode == 0x1) {
+                            handleIncomingJson(new String(payload, StandardCharsets.UTF_8));
                         }
                     }
                 } catch (Throwable ignored) {
                 } finally {
                     wsConnected = false;
                     wsOut = null;
-                    try {
-                        if (wsSocket != null) wsSocket.close();
-                    } catch (Throwable ignored) {
-                    }
-                    wsSocket = null;
+                    try { if (wsClientSocket != null) wsClientSocket.close(); } catch (Throwable ignored) {}
+                    wsClientSocket = null;
                 }
-                if (wsRunning) {
-                    try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                if (appRunning && modeSnapshot.equals(netMode)) {
+                    try { Thread.sleep(2500); } catch (InterruptedException ignored) {}
                 }
             }
         }, "AgyWsClient");
-        wsThread.start();
+        netThread.start();
+    }
+
+    private void handleIncomingJson(String msg) {
+        try {
+            JSONObject obj = new JSONObject(msg);
+            String type = obj.optString("type");
+            if ("chat".equals(type)) {
+                String txt = obj.optString("text", "").trim();
+                String sid = obj.optString("senderId", "");
+                long ts = obj.optLong("ts", System.currentTimeMillis());
+                boolean self = !sid.isEmpty() && deviceId.equals(sid);
+                if (!txt.isEmpty()) {
+                    if (MODE_CLOUDFLARE.equals(netMode)) recordUsage(0, 0, 1);
+                    saveChatMessage(txt, self, sid, ts);
+                    addChatBubble(txt, self);
+                }
+            } else if ("history".equals(type)) {
+                JSONArray items = obj.optJSONArray("items");
+                if (items != null) syncHistoryFromServer(items);
+            } else if ("clear_history".equals(type)) {
+                clearLocalHistory();
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     private String readHttpLine(DataInputStream in) throws Exception {
@@ -459,36 +625,47 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    private void writeRawFrame(OutputStream o, int opcode, byte[] payload, boolean maskFrame) throws Exception {
+        ByteArrayOutputStream frame = new ByteArrayOutputStream();
+        frame.write(0x80 | (opcode & 0x0F));
+        int len = payload.length;
+        int maskBit = maskFrame ? 0x80 : 0x00;
+        if (len <= 125) {
+            frame.write(maskBit | len);
+        } else if (len <= 65535) {
+            frame.write(maskBit | 126);
+            frame.write((len >> 8) & 0xFF);
+            frame.write(len & 0xFF);
+        } else {
+            frame.write(maskBit | 127);
+            for (int i = 7; i >= 0; i--) {
+                frame.write((int) (((long) len >> (i * 8)) & 0xFF));
+            }
+        }
+        if (maskFrame) {
+            byte[] mask = new byte[4];
+            rng.nextBytes(mask);
+            frame.write(mask);
+            for (int i = 0; i < len; i++) frame.write(payload[i] ^ mask[i % 4]);
+        } else {
+            frame.write(payload);
+        }
+        synchronized (o) {
+            o.write(frame.toByteArray());
+            o.flush();
+        }
+    }
+
     private void sendWsFrame(int opcode, byte[] payload) {
-        OutputStream out = wsOut;
-        if (out == null) return;
+        if (MODE_HOST.equals(netMode)) {
+            wsSendExecutor.execute(() -> broadcastFromHost(payload, null));
+            return;
+        }
+        if (wsOut == null) return;
         wsSendExecutor.execute(() -> {
             try {
                 OutputStream o = wsOut;
-                if (o == null) return;
-                ByteArrayOutputStream frame = new ByteArrayOutputStream();
-                frame.write(0x80 | (opcode & 0x0F));
-                int len = payload.length;
-                if (len <= 125) {
-                    frame.write(0x80 | len);
-                } else if (len <= 65535) {
-                    frame.write(0x80 | 126);
-                    frame.write((len >> 8) & 0xFF);
-                    frame.write(len & 0xFF);
-                } else {
-                    frame.write(0x80 | 127);
-                    for (int i = 7; i >= 0; i--) {
-                        frame.write((int) (((long) len >> (i * 8)) & 0xFF));
-                    }
-                }
-                byte[] mask = new byte[4];
-                rng.nextBytes(mask);
-                frame.write(mask);
-                for (int i = 0; i < len; i++) {
-                    frame.write(payload[i] ^ mask[i % 4]);
-                }
-                o.write(frame.toByteArray());
-                o.flush();
+                if (o != null) writeRawFrame(o, opcode, payload, true);
             } catch (Throwable ignored) {
             }
         });
@@ -582,7 +759,7 @@ public class MainActivity extends NativeActivity {
                 msgInput.setText("");
                 nativeSetTargetCapHeight(52f);
                 long nowTs = System.currentTimeMillis();
-                recordUsage(0, 1, 0);
+                if (MODE_CLOUDFLARE.equals(netMode)) recordUsage(0, 1, 0);
                 saveChatMessage(text, true, deviceId, nowTs);
                 addChatBubble(text, true);
                 try {
@@ -624,37 +801,6 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    private void loadChatHistory() {
-        executor.execute(() -> {
-            try {
-                File f = new File(getFilesDir(), "chat_history.json");
-                if (!f.exists()) return;
-                byte[] data = new byte[(int) f.length()];
-                try (FileInputStream fis = new FileInputStream(f)) {
-                    int read = 0;
-                    while (read < data.length) {
-                        int n = fis.read(data, read, data.length - read);
-                        if (n <= 0) break;
-                        read += n;
-                    }
-                }
-                JSONArray arr = new JSONArray(new String(data, StandardCharsets.UTF_8));
-                synchronized (historyLock) {
-                    chatHistory = arr;
-                }
-                for (int i = 0; i < arr.length(); i++) {
-                    JSONObject item = arr.optJSONObject(i);
-                    if (item != null) {
-                        String txt = item.optString("text", "");
-                        boolean self = item.optBoolean("self", false);
-                        if (!txt.isEmpty()) addChatBubble(txt, self);
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        });
-    }
-
     private String getOrCreateDeviceId() {
         SharedPreferences prefs = getSharedPreferences("cf_usage", Context.MODE_PRIVATE);
         String id = prefs.getString("device_id", "");
@@ -663,6 +809,22 @@ public class MainActivity extends NativeActivity {
             prefs.edit().putString("device_id", id).apply();
         }
         return id;
+    }
+
+    private String getLocalIpv4() {
+        try {
+            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                        String ip = addr.getHostAddress();
+                        if (ip != null && !ip.startsWith("127.")) return ip;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "Tidak terdeteksi";
     }
 
     private void syncHistoryFromServer(final JSONArray serverItems) {
@@ -716,6 +878,37 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    private void loadChatHistory() {
+        executor.execute(() -> {
+            try {
+                File f = new File(getFilesDir(), "chat_history.json");
+                if (!f.exists()) return;
+                byte[] data = new byte[(int) f.length()];
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    int read = 0;
+                    while (read < data.length) {
+                        int n = fis.read(data, read, data.length - read);
+                        if (n <= 0) break;
+                        read += n;
+                    }
+                }
+                JSONArray arr = new JSONArray(new String(data, StandardCharsets.UTF_8));
+                synchronized (historyLock) {
+                    chatHistory = arr;
+                }
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject item = arr.optJSONObject(i);
+                    if (item != null) {
+                        String txt = item.optString("text", "");
+                        boolean self = item.optBoolean("self", false);
+                        if (!txt.isEmpty()) addChatBubble(txt, self);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
     private void saveChatMessage(final String text, final boolean isSelf, final String senderId, final long ts) {
         executor.execute(() -> {
             synchronized (historyLock) {
@@ -742,34 +935,64 @@ public class MainActivity extends NativeActivity {
     public void showUsageDialog() {
         uiHandler.post(() -> {
             try {
+                String myIp = getLocalIpv4();
+                String modeLabel = MODE_HOST.equals(netMode)
+                    ? "Host Lokal (Port " + LOCAL_PORT + ", " + hostPeers.size() + " client)"
+                    : MODE_CLIENT.equals(netMode)
+                        ? "Client Lokal (" + hostIp + ":" + LOCAL_PORT + ")"
+                        : "Cloudflare Relay";
+                String status = wsConnected ? "Terhubung" : "Menyambung...";
+
                 SharedPreferences prefs = getUsagePrefs();
                 int connects = prefs.getInt("connects", 0);
                 int sent = prefs.getInt("sent", 0);
                 int recv = prefs.getInt("recv", 0);
-                int totalMsgs = sent + recv;
-                int estBillableReq = connects + (totalMsgs + 19) / 20;
-                double pct = (estBillableReq / 100000.0) * 100.0;
-                int savedCount;
-                synchronized (historyLock) {
-                    savedCount = chatHistory.length();
-                }
 
-                String status = wsConnected ? "Terhubung (Cloudflare)" : "Menyambung ulang...";
-                String info = "Status: " + status
-                    + "\nRoom: 1234\n\n"
-                    + "Pemakaian Hari Ini:\n"
-                    + "• Handshake Koneksi: " + connects + "\n"
-                    + "• Pesan Terkirim: " + sent + "\n"
-                    + "• Pesan Diterima: " + recv + "\n"
-                    + "• Est. Request Cloudflare: ~" + estBillableReq + " / 100.000 ("
-                    + String.format(Locale.US, "%.4f%%", pct) + ")\n\n"
-                    + "Riwayat Chat Tersimpan: " + savedCount + " pesan";
+                String info = "Mode: " + modeLabel
+                    + "\nStatus: " + status
+                    + "\nIP WiFi HP ini: " + myIp
+                    + "\n\nCloudflare Usage Hari Ini: " + (connects + (sent + recv + 19) / 20) + " req";
+
+                final EditText ipInput = new EditText(this);
+                ipInput.setHint("IP Host (misal 192.168.1.5)");
+                ipInput.setText(hostIp);
+                ipInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+
+                LinearLayout box = new LinearLayout(this);
+                box.setOrientation(LinearLayout.VERTICAL);
+                int pad = (int) (18 * density);
+                box.setPadding(pad, pad / 2, pad, 0);
+                TextView tv = new TextView(this);
+                tv.setText(info);
+                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+                box.addView(tv);
+                box.addView(ipInput);
 
                 new AlertDialog.Builder(this)
-                    .setTitle("Cloudflare Usage & Chat")
-                    .setMessage(info)
-                    .setPositiveButton("Tutup", null)
-                    .setNeutralButton("Hapus Chat", (d, w) -> {
+                    .setTitle("Koneksi Lokal & Chat")
+                    .setView(box)
+                    .setPositiveButton("Jadi Host", (d, w) -> {
+                        netMode = MODE_HOST;
+                        getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
+                            .edit().putString("net_mode", netMode).apply();
+                        restartNetwork();
+                        Toast.makeText(this, "Host aktif di " + myIp + ":" + LOCAL_PORT, Toast.LENGTH_LONG).show();
+                    })
+                    .setNeutralButton("Gabung Host", (d, w) -> {
+                        String ip = ipInput.getText().toString().trim();
+                        if (!ip.isEmpty()) {
+                            hostIp = ip;
+                            netMode = MODE_CLIENT;
+                            getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
+                                .edit()
+                                .putString("net_mode", netMode)
+                                .putString("host_ip", hostIp)
+                                .apply();
+                            restartNetwork();
+                            Toast.makeText(this, "Menyambung ke " + hostIp + ":" + LOCAL_PORT, Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .setNegativeButton("Hapus Chat", (d, w) -> {
                         clearLocalHistory();
                         try {
                             JSONObject clr = new JSONObject();
@@ -867,8 +1090,8 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
-        wsRunning = false;
-        try { if (wsSocket != null) wsSocket.close(); } catch (Throwable ignored) {}
+        appRunning = false;
+        stopNetwork();
         if (overlaysAttached && windowManager != null) {
             try { windowManager.removeViewImmediate(chatScroll); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(fpsLabel); } catch (Throwable ignored) {}
