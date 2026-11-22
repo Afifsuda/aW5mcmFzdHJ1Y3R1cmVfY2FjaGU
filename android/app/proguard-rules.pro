@@ -1,1 +1,2 @@
-# ProGuard rules
+-keep class com.afifsuda.canvas.MainActivity { *; }
+-keepclasseswithmembernames class com.afifsuda.canvas.MainActivity { *; }

@@ -152,10 +152,12 @@ extern "C" {
     );
     fn glCompileShader(shader: u32);
     fn glGetShaderiv(shader: u32, pname: u32, params: *mut i32);
+    fn glGetShaderInfoLog(shader: u32, buf_size: i32, length: *mut i32, info_log: *mut u8);
     fn glCreateProgram() -> u32;
     fn glAttachShader(program: u32, shader: u32);
     fn glLinkProgram(program: u32);
     fn glGetProgramiv(program: u32, pname: u32, params: *mut i32);
+    fn glGetProgramInfoLog(program: u32, buf_size: i32, length: *mut i32, info_log: *mut u8);
     fn glDeleteShader(shader: u32);
     fn glUseProgram(program: u32);
     fn glGetUniformLocation(program: u32, name: *const u8) -> i32;
@@ -599,10 +601,10 @@ struct GlState {
 }
 
 impl GlState {
-    unsafe fn init(window: *mut c_void, width: i32, height: i32) -> Option<Self> {
+    unsafe fn init(window: *mut c_void, width: i32, height: i32) -> Result<Self, String> {
         let display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if display.is_null() || eglInitialize(display, ptr::null_mut(), ptr::null_mut()) == 0 {
-            return None;
+            return Err("EGL: eglGetDisplay/eglInitialize gagal".to_string());
         }
 
         let attribs = [
@@ -625,25 +627,25 @@ impl GlState {
         if eglChooseConfig(display, attribs.as_ptr(), &mut config, 1, &mut num_configs) == 0
             || num_configs == 0
         {
-            return None;
+            return Err("EGL: eglChooseConfig gagal (GLES3 tidak didukung)".to_string());
         }
 
         let ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE];
         let context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs.as_ptr());
         if context.is_null() {
-            return None;
+            return Err("EGL: eglCreateContext gagal".to_string());
         }
 
         let surface = eglCreateWindowSurface(display, config, window, ptr::null());
         if surface.is_null() {
             eglDestroyContext(display, context);
-            return None;
+            return Err("EGL: eglCreateWindowSurface gagal".to_string());
         }
 
         if eglMakeCurrent(display, surface, surface, context) == 0 {
             eglDestroySurface(display, surface);
             eglDestroyContext(display, context);
-            return None;
+            return Err("EGL: eglMakeCurrent gagal".to_string());
         }
         eglSwapInterval(display, 1);
         glViewport(0, 0, width, height);
@@ -660,8 +662,12 @@ impl GlState {
         let mut linked = 0;
         glGetProgramiv(program, GL_LINK_STATUS, &mut linked);
         if linked == 0 {
+            let mut buf = [0u8; 512];
+            let mut len = 0;
+            glGetProgramInfoLog(program, 512, &mut len, buf.as_mut_ptr());
+            let msg = String::from_utf8_lossy(&buf[..(len.max(0) as usize).min(512)]).to_string();
             glDeleteProgram(program);
-            return None;
+            return Err(format!("Program link error: {msg}"));
         }
 
         let mut vao = 0;
@@ -694,7 +700,7 @@ impl GlState {
             glGetUniformLocation(program, c.as_ptr() as *const u8)
         };
 
-        Some(Self {
+        Ok(Self {
             display,
             config,
             context,
@@ -839,7 +845,7 @@ impl GlState {
     }
 }
 
-unsafe fn compile_shader(ty: u32, src: &str) -> Option<u32> {
+unsafe fn compile_shader(ty: u32, src: &str) -> Result<u32, String> {
     let shader = glCreateShader(ty);
     let ptr = src.as_ptr();
     glShaderSource(shader, 1, &ptr, ptr::null());
@@ -847,10 +853,15 @@ unsafe fn compile_shader(ty: u32, src: &str) -> Option<u32> {
     let mut ok = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &mut ok);
     if ok == 0 {
+        let mut buf = [0u8; 512];
+        let mut len = 0;
+        glGetShaderInfoLog(shader, 512, &mut len, buf.as_mut_ptr());
+        let msg = String::from_utf8_lossy(&buf[..(len.max(0) as usize).min(512)]).to_string();
         glDeleteShader(shader);
-        return None;
+        let kind = if ty == GL_VERTEX_SHADER { "Vertex" } else { "Fragment" };
+        return Err(format!("{kind} shader compile error: {msg}"));
     }
-    Some(shader)
+    Ok(shader)
 }
 
 fn hit_plus(x_dp: f32, y_dp: f32, l: &Layout) -> bool {
@@ -875,6 +886,28 @@ fn call_java_void(vm: &JavaVM, activity: *mut c_void, method: &str, sig: &str, a
     if let Ok(mut env) = vm.attach_current_thread() {
         let obj = unsafe { JObject::from_raw(activity as jni::sys::jobject) };
         let _ = env.call_method(&obj, method, sig, args);
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        std::mem::forget(obj);
+    }
+}
+
+fn report_error_to_java(vm: &JavaVM, activity: *mut c_void, msg: &str) {
+    if let Ok(mut env) = vm.attach_current_thread() {
+        let obj = unsafe { JObject::from_raw(activity as jni::sys::jobject) };
+        if let Ok(jstr) = env.new_string(msg) {
+            let _ = env.call_method(
+                &obj,
+                "showErrorAndCopy",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&jstr)],
+            );
+        }
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
         std::mem::forget(obj);
     }
 }
@@ -883,6 +916,15 @@ fn call_java_void(vm: &JavaVM, activity: *mut c_void, method: &str, sig: &str, a
 fn android_main(app: AndroidApp) {
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut _) }.ok();
     let activity_ptr = app.activity_as_ptr();
+    let activity_addr = activity_ptr as usize;
+    let vm_addr = app.vm_as_ptr() as usize;
+
+    std::panic::set_hook(Box::new(move |info| {
+        let vm_ptr = vm_addr as *mut jni::sys::JavaVM;
+        if let Ok(vm) = unsafe { JavaVM::from_raw(vm_ptr) } {
+            report_error_to_java(&vm, activity_addr as *mut c_void, &format!("Rust Panic:\n{info}"));
+        }
+    }));
 
     let dpr = app
         .config()
@@ -935,7 +977,14 @@ fn android_main(app: AndroidApp) {
                             if let Some(ref mut state) = gl {
                                 state.recreate_surface(win.ptr().as_ptr() as *mut c_void, w, h);
                             } else {
-                                gl = GlState::init(win.ptr().as_ptr() as *mut c_void, w, h);
+                                match GlState::init(win.ptr().as_ptr() as *mut c_void, w, h) {
+                                    Ok(state) => gl = Some(state),
+                                    Err(err) => {
+                                        if let Some(ref vm) = vm {
+                                            report_error_to_java(vm, activity_ptr, &err);
+                                        }
+                                    }
+                                }
                             }
                         }
                         has_window = true;

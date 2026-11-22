@@ -1,6 +1,9 @@
 package com.afifsuda.canvas;
 
+import android.app.AlertDialog;
 import android.app.NativeActivity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -21,8 +24,13 @@ import android.view.ViewTreeObserver;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
@@ -78,6 +86,11 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            StringWriter sw = new StringWriter();
+            throwable.printStackTrace(new PrintWriter(sw));
+            showErrorAndCopy("Uncaught Exception (" + thread.getName() + "):\n" + sw.toString());
+        });
         super.onCreate(savedInstanceState);
         density = getResources().getDisplayMetrics().density;
 
@@ -218,6 +231,39 @@ public class MainActivity extends NativeActivity {
             } catch (Throwable ignored) {
             } finally {
                 if (conn != null) conn.disconnect();
+            }
+        });
+    }
+
+    public void showErrorAndCopy(final String errorText) {
+        uiHandler.post(() -> {
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("App Error", errorText));
+                }
+                Toast.makeText(this, "Error otomatis disalin ke clipboard", Toast.LENGTH_SHORT).show();
+
+                ScrollView scroll = new ScrollView(this);
+                TextView tv = new TextView(this);
+                tv.setText(errorText);
+                tv.setTextIsSelectable(true);
+                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+                int pad = (int) (16 * density);
+                tv.setPadding(pad, pad, pad, pad);
+                scroll.addView(tv);
+
+                new AlertDialog.Builder(this)
+                    .setTitle("Terjadi Error (Tersalin ke Clipboard)")
+                    .setView(scroll)
+                    .setPositiveButton("Salin Lagi", (d, w) -> {
+                        if (cm != null) {
+                            cm.setPrimaryClip(ClipData.newPlainText("App Error", errorText));
+                        }
+                    })
+                    .setNegativeButton("Tutup", null)
+                    .show();
+            } catch (Throwable ignored) {
             }
         });
     }
