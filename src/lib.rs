@@ -25,6 +25,11 @@ static TARGET_CAP_HEIGHT_DP: AtomicU32 = AtomicU32::new(0x42500000); // 52.0f32.
 static IS_FOCUSED: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_INSET_PX: AtomicI32 = AtomicI32::new(0);
 static JAVA_CAP_PRESSED: AtomicBool = AtomicBool::new(false);
+static MODAL_OPEN: AtomicBool = AtomicBool::new(false);
+static MODAL_CX_PX: AtomicU32 = AtomicU32::new(0);
+static MODAL_CY_PX: AtomicU32 = AtomicU32::new(0);
+static MODAL_HW_PX: AtomicU32 = AtomicU32::new(0);
+static MODAL_HH_PX: AtomicU32 = AtomicU32::new(0);
 
 #[no_mangle]
 pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeOnWallpaperLoaded(
@@ -79,6 +84,30 @@ pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetCapPressed
     pressed: jboolean,
 ) {
     JAVA_CAP_PRESSED.store(pressed != 0, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetModalOpen(
+    _env: JNIEnv,
+    _class: JClass,
+    open: jboolean,
+) {
+    MODAL_OPEN.store(open != 0, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetModalBounds(
+    _env: JNIEnv,
+    _class: JClass,
+    cx: jfloat,
+    cy: jfloat,
+    hw: jfloat,
+    hh: jfloat,
+) {
+    MODAL_CX_PX.store(cx.to_bits(), Ordering::Relaxed);
+    MODAL_CY_PX.store(cy.to_bits(), Ordering::Relaxed);
+    MODAL_HW_PX.store(hw.to_bits(), Ordering::Relaxed);
+    MODAL_HH_PX.store(hh.to_bits(), Ordering::Relaxed);
 }
 
 // --- Minimal EGL & GLESv3 FFI ---
@@ -233,6 +262,10 @@ uniform float sendPulse;
 uniform vec2 tilt;
 uniform float fpsBoxHalfW;
 uniform vec3 uEnvColor;
+uniform float modalOpen;
+uniform vec2 modalCenter;
+uniform vec2 modalHalf;
+uniform float modalRadius;
 
 out vec4 fragColor;
 
@@ -402,63 +435,77 @@ void main() {
     }
 
     float barTopBound = capCenter.y - capHalf.y - 46.0 * dpr;
-    if (px.y < barTopBound) {
+    if (modalOpen <= 0.005 && px.y < barTopBound) {
         fragColor = vec4(col, 1.0);
         return;
     }
 
-    // --- LAYER 1: EXPANDING CAPSULE INPUT FIELD ---
-    vec2 pCap = px - capCenter;
-    float capDrop = capPress * 1.4 * dpr;
-    vec2 pCapPhys = pCap - vec2(0.0, capDrop);
+    if (modalOpen <= 0.005 || px.y >= barTopBound) {
+        // --- LAYER 1: EXPANDING CAPSULE INPUT FIELD ---
+        vec2 pCap = px - capCenter;
+        float capDrop = capPress * 1.4 * dpr;
+        vec2 pCapPhys = pCap - vec2(0.0, capDrop);
 
-    if (abs(pCap.x) < capHalf.x + 48.0 * dpr) {
-        vec2 bCap = capHalf * (1.0 - capPress * 0.008);
-        float rCap = capRadius * (1.0 - capPress * 0.008);
-        float dCap = sdRoundBox(pCapPhys, bCap, rCap);
-        float dCapPenumbra = sdRoundBox(pCap - vec2(0.0, 7.0 * dpr) * (1.0 - capPress * 0.5), bCap, rCap);
-        float dCapCrevice = sdRoundBox(pCap - vec2(0.0, 1.8 * dpr) * (1.0 - capPress * 0.5), bCap, rCap);
+        if (abs(pCap.x) < capHalf.x + 48.0 * dpr) {
+            vec2 bCap = capHalf * (1.0 - capPress * 0.008);
+            float rCap = capRadius * (1.0 - capPress * 0.008);
+            float dCap = sdRoundBox(pCapPhys, bCap, rCap);
+            float dCapPenumbra = sdRoundBox(pCap - vec2(0.0, 7.0 * dpr) * (1.0 - capPress * 0.5), bCap, rCap);
+            float dCapCrevice = sdRoundBox(pCap - vec2(0.0, 1.8 * dpr) * (1.0 - capPress * 0.5), bCap, rCap);
 
-        col = render3DMatteSurface(col, envBounce, pCapPhys, dCap, dCapPenumbra, dCapCrevice, capPress, isFocused, true, false, 0);
-    }
+            col = render3DMatteSurface(col, envBounce, pCapPhys, dCap, dCapPenumbra, dCapCrevice, capPress, isFocused, true, false, 0);
+        }
 
-    // --- LAYER 2: TOMBOL + DI SISI KIRI ---
-    vec2 pPlus = px - (plusCenter + vec2(0.0, capDrop));
-    if (abs(pPlus.x) < plusRadius + 28.0 * dpr && abs(pPlus.y) < plusRadius + 28.0 * dpr) {
-        float pressDrop = plusPress * 1.5 * dpr;
-        vec2 pPlusPhys = pPlus - vec2(0.0, pressDrop);
-        float rPlus = plusRadius * (1.0 - plusPress * 0.045 + plusPulse * 0.06);
-        float dPlus = length(pPlusPhys) - rPlus;
-        float dPlusPenumbra = length(pPlus - vec2(0.0, 3.2 * dpr) * (1.0 - plusPress * 0.6)) - rPlus;
-        float dPlusCrevice = length(pPlus - vec2(0.0, 1.0 * dpr) * (1.0 - plusPress * 0.6)) - rPlus;
+        // --- LAYER 2: TOMBOL + DI SISI KIRI ---
+        vec2 pPlus = px - (plusCenter + vec2(0.0, capDrop));
+        if (abs(pPlus.x) < plusRadius + 28.0 * dpr && abs(pPlus.y) < plusRadius + 28.0 * dpr) {
+            float pressDrop = plusPress * 1.5 * dpr;
+            vec2 pPlusPhys = pPlus - vec2(0.0, pressDrop);
+            float rPlus = plusRadius * (1.0 - plusPress * 0.045 + plusPulse * 0.06);
+            float dPlus = length(pPlusPhys) - rPlus;
+            float dPlusPenumbra = length(pPlus - vec2(0.0, 3.2 * dpr) * (1.0 - plusPress * 0.6)) - rPlus;
+            float dPlusCrevice = length(pPlus - vec2(0.0, 1.0 * dpr) * (1.0 - plusPress * 0.6)) - rPlus;
 
-        col = render3DMatteSurface(col, envBounce, pPlusPhys, dPlus, dPlusPenumbra, dPlusCrevice, plusPress, plusPulse, false, false, 1);
+            col = render3DMatteSurface(col, envBounce, pPlusPhys, dPlus, dPlusPenumbra, dPlusCrevice, plusPress, plusPulse, false, false, 1);
 
-        if (dPlus < -1.0 * dpr) {
-            float angle = plusPulse * 1.5707963;
-            float ca = cos(angle), sa = sin(angle);
-            vec2 pRot = vec2(pPlusPhys.x * ca - pPlusPhys.y * sa, pPlusPhys.x * sa + pPlusPhys.y * ca);
-            float plusAlpha = samplePlusIcon(pRot, 1.0 - plusPress * 0.045);
-            if (plusAlpha > 0.001) col = mix(col, vec3(0.08, 0.10, 0.15), plusAlpha * 0.96);
+            if (dPlus < -1.0 * dpr) {
+                float angle = plusPulse * 1.5707963;
+                float ca = cos(angle), sa = sin(angle);
+                vec2 pRot = vec2(pPlusPhys.x * ca - pPlusPhys.y * sa, pPlusPhys.x * sa + pPlusPhys.y * ca);
+                float plusAlpha = samplePlusIcon(pRot, 1.0 - plusPress * 0.045);
+                if (plusAlpha > 0.001) col = mix(col, vec3(0.08, 0.10, 0.15), plusAlpha * 0.96);
+            }
+        }
+
+        // --- LAYER 2: TOMBOL KIRIM DI SISI KANAN ---
+        vec2 pBtn = px - (btnCenter + vec2(0.0, capDrop));
+        if (abs(pBtn.x) < btnRadius + 28.0 * dpr && abs(pBtn.y) < btnRadius + 28.0 * dpr) {
+            float btnDrop = btnPress * 1.5 * dpr;
+            vec2 pBtnPhys = pBtn - vec2(0.0, btnDrop);
+            float rBtn = btnRadius * (1.0 - btnPress * 0.045 + sendPulse * 0.06);
+            float dBtn = length(pBtnPhys) - rBtn;
+            float dBtnPenumbra = length(pBtn - vec2(0.0, 3.2 * dpr) * (1.0 - btnPress * 0.6)) - rBtn;
+            float dBtnCrevice = length(pBtn - vec2(0.0, 1.0 * dpr) * (1.0 - btnPress * 0.6)) - rBtn;
+
+            col = render3DMatteSurface(col, envBounce, pBtnPhys, dBtn, dBtnPenumbra, dBtnCrevice, btnPress, sendPulse, false, true, 1);
+
+            if (dBtn < -1.0 * dpr) {
+                vec2 pIcon = pBtnPhys + vec2(0.0, sendPulse * 4.0 * dpr);
+                float iconAlpha = sampleArrowUpIcon(pIcon, 1.0 - btnPress * 0.045);
+                if (iconAlpha > 0.001) col = mix(col, vec3(1.0), iconAlpha * 0.98);
+            }
         }
     }
 
-    // --- LAYER 2: TOMBOL KIRIM DI SISI KANAN ---
-    vec2 pBtn = px - (btnCenter + vec2(0.0, capDrop));
-    if (abs(pBtn.x) < btnRadius + 28.0 * dpr && abs(pBtn.y) < btnRadius + 28.0 * dpr) {
-        float btnDrop = btnPress * 1.5 * dpr;
-        vec2 pBtnPhys = pBtn - vec2(0.0, btnDrop);
-        float rBtn = btnRadius * (1.0 - btnPress * 0.045 + sendPulse * 0.06);
-        float dBtn = length(pBtnPhys) - rBtn;
-        float dBtnPenumbra = length(pBtn - vec2(0.0, 3.2 * dpr) * (1.0 - btnPress * 0.6)) - rBtn;
-        float dBtnCrevice = length(pBtn - vec2(0.0, 1.0 * dpr) * (1.0 - btnPress * 0.6)) - rBtn;
-
-        col = render3DMatteSurface(col, envBounce, pBtnPhys, dBtn, dBtnPenumbra, dBtnCrevice, btnPress, sendPulse, false, true, 1);
-
-        if (dBtn < -1.0 * dpr) {
-            vec2 pIcon = pBtnPhys + vec2(0.0, sendPulse * 4.0 * dpr);
-            float iconAlpha = sampleArrowUpIcon(pIcon, 1.0 - btnPress * 0.045);
-            if (iconAlpha > 0.001) col = mix(col, vec3(1.0), iconAlpha * 0.98);
+    // --- LAYER 3 (SHADER 3D MATTE CARD): MODAL MENU TOMBOL + ---
+    if (modalOpen > 0.005) {
+        float modScale = mix(0.92, 1.0, modalOpen);
+        vec2 pMod = (px - modalCenter) / modScale;
+        if (abs(pMod.x) < modalHalf.x + 48.0 * dpr && abs(pMod.y) < modalHalf.y + 48.0 * dpr) {
+            float dMod = sdRoundBox(pMod, modalHalf, modalRadius) * modScale;
+            float dModPenumbra = sdRoundBox(pMod - vec2(0.0, 10.0 * dpr), modalHalf, modalRadius) * modScale;
+            float dModCrevice = sdRoundBox(pMod - vec2(0.0, 2.5 * dpr), modalHalf, modalRadius) * modScale;
+            col = render3DMatteSurface(col, envBounce, pMod, dMod, dModPenumbra, dModCrevice, 0.0, 0.0, true, false, 0);
         }
     }
 
@@ -541,6 +588,10 @@ struct Uniforms {
     tilt: i32,
     fps_box_half_w: i32,
     u_env_color: i32,
+    modal_open: i32,
+    modal_center: i32,
+    modal_half: i32,
+    modal_radius: i32,
 }
 
 struct GlState {
@@ -692,6 +743,10 @@ impl GlState {
                 tilt: loc("tilt"),
                 fps_box_half_w: loc("fpsBoxHalfW"),
                 u_env_color: loc("uEnvColor"),
+                modal_open: loc("modalOpen"),
+                modal_center: loc("modalCenter"),
+                modal_half: loc("modalHalf"),
+                modal_radius: loc("modalRadius"),
             },
             width,
             height,
@@ -764,6 +819,8 @@ impl GlState {
         btn_press: f32,
         focused: f32,
         send_pulse: f32,
+        modal_open: f32,
+        modal_bounds: [f32; 4],
     ) {
         if self.surface.is_null() {
             return;
@@ -798,6 +855,10 @@ impl GlState {
         glUniform2f(self.u.tilt, 0.0, 0.0);
         glUniform1f(self.u.fps_box_half_w, 34.0 * dpr);
         glUniform3f(self.u.u_env_color, self.env_rgb[0], self.env_rgb[1], self.env_rgb[2]);
+        glUniform1f(self.u.modal_open, modal_open);
+        glUniform2f(self.u.modal_center, modal_bounds[0], modal_bounds[1]);
+        glUniform2f(self.u.modal_half, modal_bounds[2], modal_bounds[3]);
+        glUniform1f(self.u.modal_radius, 24.0 * dpr);
 
         glDrawArrays(GL_TRIANGLES, 0, 3);
         eglSwapBuffers(self.display, self.surface);
@@ -933,6 +994,7 @@ fn android_main(app: AndroidApp) {
     let mut plus_pulse_val: f32 = 0.0;
     let mut focus_val: f32 = 0.0;
     let mut send_pulse_val: f32 = 0.0;
+    let mut modal_open_val: f32 = 0.0;
     let mut img_fade: f32 = 0.0;
     let mut current_wall_idx: i32 = 0;
 
@@ -955,6 +1017,7 @@ fn android_main(app: AndroidApp) {
             || btn_press_val > 0.005
             || plus_pulse_val > 0.005
             || send_pulse_val > 0.005
+            || (modal_open_val - if MODAL_OPEN.load(Ordering::Relaxed) { 1.0 } else { 0.0 }).abs() > 0.005
             || (focus_val - if IS_FOCUSED.load(Ordering::Relaxed) { 1.0 } else { 0.0 }).abs() > 0.005;
 
         let timeout = if !has_window {
@@ -1125,6 +1188,11 @@ fn android_main(app: AndroidApp) {
         cap_press_val += ((if any_cap_pressed { 1.0 } else { 0.0 }) - cap_press_val) * (dt * 18.0).min(1.0);
         btn_press_val += ((if btn_pressed { 1.0 } else { 0.0 }) - btn_press_val) * (dt * 18.0).min(1.0);
         focus_val += (focused - focus_val) * (dt * 12.0).min(1.0);
+        let target_modal = if MODAL_OPEN.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+        modal_open_val += (target_modal - modal_open_val) * (dt * 18.0).min(1.0);
+        if modal_open_val < 0.003 && target_modal == 0.0 {
+            modal_open_val = 0.0;
+        }
         plus_pulse_val *= (0.86_f32).powf(dt * 60.0);
         send_pulse_val *= (0.86_f32).powf(dt * 60.0);
 
@@ -1162,8 +1230,16 @@ fn android_main(app: AndroidApp) {
             || (cap_press_val - if any_cap_pressed { 1.0 } else { 0.0 }).abs() > 0.003
             || (btn_press_val - if btn_pressed { 1.0 } else { 0.0 }).abs() > 0.003
             || (focus_val - focused).abs() > 0.003
+            || (modal_open_val - target_modal).abs() > 0.003
             || plus_pulse_val > 0.003
             || send_pulse_val > 0.003;
+
+        let modal_bounds = [
+            f32::from_bits(MODAL_CX_PX.load(Ordering::Relaxed)),
+            f32::from_bits(MODAL_CY_PX.load(Ordering::Relaxed)),
+            f32::from_bits(MODAL_HW_PX.load(Ordering::Relaxed)),
+            f32::from_bits(MODAL_HH_PX.load(Ordering::Relaxed)),
+        ];
 
         if has_window && (needs_redraw || still_animating) {
             if let Some(ref state) = gl {
@@ -1178,6 +1254,8 @@ fn android_main(app: AndroidApp) {
                         btn_press_val,
                         focus_val,
                         send_pulse_val,
+                        modal_open_val,
+                        modal_bounds,
                     );
                 }
             }

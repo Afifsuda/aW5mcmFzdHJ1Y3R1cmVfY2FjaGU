@@ -30,7 +30,9 @@ import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -86,6 +88,8 @@ public class MainActivity extends NativeActivity {
     private static native void nativeSetFocused(boolean focused);
     private static native void nativeSetKeyboardInset(int insetPx);
     private static native void nativeSetCapPressed(boolean pressed);
+    private static native void nativeSetModalOpen(boolean open);
+    private static native void nativeSetModalBounds(float cx, float cy, float hw, float hh);
 
     private static final String RELAY_HOST = "aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev";
     private static final String RELAY_PATH = "/?room=1234";
@@ -140,6 +144,9 @@ public class MainActivity extends NativeActivity {
     private WindowManager.LayoutParams fpsLp;
     private WindowManager.LayoutParams inputLp;
     private WindowManager.LayoutParams chatLp;
+    private FrameLayout modalRoot;
+    private LinearLayout modalCard;
+    private WindowManager.LayoutParams modalLp;
 
     private boolean overlaysAttached = false;
     private float density = 1.0f;
@@ -315,6 +322,36 @@ public class MainActivity extends NativeActivity {
             windowManager.addView(chatScroll, chatLp);
             windowManager.addView(fpsLabel, fpsLp);
             windowManager.addView(msgInput, inputLp);
+
+            modalRoot = new FrameLayout(this);
+            modalRoot.setBackgroundColor(Color.TRANSPARENT);
+            modalRoot.setVisibility(View.GONE);
+            modalRoot.setOnClickListener(v -> closeModal());
+
+            modalCard = new LinearLayout(this);
+            modalCard.setOrientation(LinearLayout.VERTICAL);
+            modalCard.setBackgroundColor(Color.TRANSPARENT);
+            int mPad = (int) (20 * density);
+            modalCard.setPadding(mPad, mPad, mPad, (int) (18 * density));
+            modalCard.setClickable(true);
+            FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(
+                (int) Math.min(340 * density, getResources().getDisplayMetrics().widthPixels - 40 * density),
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            );
+            modalRoot.addView(modalCard, cardLp);
+
+            modalLp = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            );
+            modalLp.token = token;
+            windowManager.addView(modalRoot, modalLp);
+
             overlaysAttached = true;
             loadChatHistory();
         } catch (Throwable t) {
@@ -1023,9 +1060,39 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    private void closeModal() {
+        if (modalRoot != null) {
+            modalRoot.setVisibility(View.GONE);
+        }
+        nativeSetModalOpen(false);
+        if (chatScroll != null) {
+            chatScroll.animate().alpha(1.0f).setDuration(150).start();
+        }
+    }
+
+    private Button makeModalBtn(String label, int bgColor, int textColor) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        b.setTextColor(textColor);
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(bgColor);
+        d.setCornerRadius(14 * density);
+        b.setBackground(d);
+        b.setStateListAnimator(null);
+        int py = (int) (9 * density);
+        b.setPadding((int) (10 * density), py, (int) (10 * density), py);
+        return b;
+    }
+
     public void showUsageDialog() {
         uiHandler.post(() -> {
             try {
+                if (modalRoot == null || modalCard == null) return;
+                modalCard.removeAllViews();
+
                 String myIp = getLocalIpv4();
                 String modeLabel = MODE_HOST.equals(netMode)
                     ? "Host Lokal (Port " + LOCAL_PORT + ", " + hostPeers.size() + " client)"
@@ -1034,38 +1101,39 @@ public class MainActivity extends NativeActivity {
                         : "Cloudflare Relay";
                 String status = wsConnected
                     ? "Terhubung"
-                    : ("Menyambung..." + (lastNetError.isEmpty() ? "" : "\n(" + lastNetError + ")"));
+                    : ("Menyambung..." + (lastNetError.isEmpty() ? "" : " (" + lastNetError + ")"));
 
-                String info = "Mode: " + modeLabel
-                    + "\nStatus: " + status
-                    + "\nIP HP ini: " + myIp;
+                TextView title = new TextView(this);
+                title.setText("Koneksi Lokal & Chat");
+                title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+                title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                title.setTextColor(Color.parseColor("#111622"));
+                modalCard.addView(title);
 
-                final EditText ipInput = new EditText(this);
-                ipInput.setHint("Atau ketik IP Host (contoh: 192.168.1.5)");
-                ipInput.setText(hostIp);
-                ipInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-
-                LinearLayout box = new LinearLayout(this);
-                box.setOrientation(LinearLayout.VERTICAL);
-                int pad = (int) (18 * density);
-                box.setPadding(pad, pad / 2, pad, 0);
                 TextView tv = new TextView(this);
-                tv.setText(info);
-                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-                box.addView(tv);
+                tv.setText("Mode: " + modeLabel + "\nStatus: " + status + "\nIP HP ini: " + myIp);
+                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                tv.setTextColor(Color.parseColor("#5B677A"));
+                LinearLayout.LayoutParams tvLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                );
+                tvLp.topMargin = (int) (6 * density);
+                tvLp.bottomMargin = (int) (12 * density);
+                modalCard.addView(tv, tvLp);
 
-                final AlertDialog[] holder = new AlertDialog[1];
                 if (!discoveredHosts.isEmpty()) {
-                    TextView foundTitle = new TextView(this);
-                    foundTitle.setText("\nHost Terdeteksi Otomatis (Klik untuk gabung):");
-                    foundTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-                    foundTitle.setTypeface(null, Typeface.BOLD);
-                    box.addView(foundTitle);
                     for (Map.Entry<String, String> entry : discoveredHosts.entrySet()) {
                         final String foundIp = entry.getKey();
                         final String model = entry.getValue();
-                        android.widget.Button btn = new android.widget.Button(this);
-                        btn.setText("Gabung " + model + " (" + foundIp + ")");
+                        Button btn = makeModalBtn(
+                            "Gabung " + model + " (" + foundIp + ")",
+                            Color.parseColor("#E3EEFF"),
+                            Color.parseColor("#145BD4")
+                        );
+                        LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                        );
+                        bLp.bottomMargin = (int) (8 * density);
                         btn.setOnClickListener(v -> {
                             hostIp = foundIp;
                             netMode = MODE_CLIENT;
@@ -1075,49 +1143,97 @@ public class MainActivity extends NativeActivity {
                                 .putString("host_ip", hostIp)
                                 .apply();
                             restartNetwork();
-                            if (holder[0] != null) holder[0].dismiss();
+                            closeModal();
                             Toast.makeText(this, "Menyambung ke " + model, Toast.LENGTH_SHORT).show();
                         });
-                        box.addView(btn);
+                        modalCard.addView(btn, bLp);
                     }
                 }
-                box.addView(ipInput);
 
-                holder[0] = new AlertDialog.Builder(this)
-                    .setTitle("Koneksi Lokal & Chat")
-                    .setView(box)
-                    .setPositiveButton("Jadi Host", (d, w) -> {
-                        netMode = MODE_HOST;
+                final EditText ipInput = new EditText(this);
+                ipInput.setHint("IP Host (misal 192.168.1.5)");
+                ipInput.setText(hostIp);
+                ipInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+                ipInput.setTextColor(Color.parseColor("#111622"));
+                ipInput.setHintTextColor(Color.parseColor("#768296"));
+                ipInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                GradientDrawable inpBg = new GradientDrawable();
+                inpBg.setColor(Color.argb(150, 255, 255, 255));
+                inpBg.setStroke((int) Math.max(1, density), Color.argb(64, 118, 130, 150));
+                inpBg.setCornerRadius(14 * density);
+                ipInput.setBackground(inpBg);
+                int iPad = (int) (12 * density);
+                ipInput.setPadding(iPad, (int) (10 * density), iPad, (int) (10 * density));
+                LinearLayout.LayoutParams inpLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                );
+                inpLp.bottomMargin = (int) (12 * density);
+                modalCard.addView(ipInput, inpLp);
+
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+
+                Button btnClear = makeModalBtn("Hapus", Color.argb(26, 200, 30, 30), Color.parseColor("#C81E1E"));
+                btnClear.setOnClickListener(v -> {
+                    clearLocalHistory();
+                    try {
+                        JSONObject clr = new JSONObject();
+                        clr.put("type", "clear_history");
+                        sendWsFrame(0x1, clr.toString().getBytes(StandardCharsets.UTF_8));
+                    } catch (Throwable ignored) {}
+                    closeModal();
+                    Toast.makeText(this, "Riwayat chat dihapus", Toast.LENGTH_SHORT).show();
+                });
+
+                Button btnJoin = makeModalBtn("Gabung", Color.argb(18, 20, 25, 35), Color.parseColor("#141923"));
+                btnJoin.setOnClickListener(v -> {
+                    String ip = sanitizeIp(ipInput.getText().toString());
+                    if (!ip.isEmpty()) {
+                        hostIp = ip;
+                        netMode = MODE_CLIENT;
                         getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
-                            .edit().putString("net_mode", netMode).apply();
+                            .edit()
+                            .putString("net_mode", netMode)
+                            .putString("host_ip", hostIp)
+                            .apply();
                         restartNetwork();
-                        Toast.makeText(this, "Host aktif di " + myIp, Toast.LENGTH_LONG).show();
-                    })
-                    .setNeutralButton("Gabung Manual", (d, w) -> {
-                        String ip = sanitizeIp(ipInput.getText().toString());
-                        if (!ip.isEmpty()) {
-                            hostIp = ip;
-                            netMode = MODE_CLIENT;
-                            getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
-                                .edit()
-                                .putString("net_mode", netMode)
-                                .putString("host_ip", hostIp)
-                                .apply();
-                            restartNetwork();
-                            Toast.makeText(this, "Menyambung ke " + hostIp, Toast.LENGTH_SHORT).show();
-                        }
-                    })
-                    .setNegativeButton("Hapus Chat", (d, w) -> {
-                        clearLocalHistory();
-                        try {
-                            JSONObject clr = new JSONObject();
-                            clr.put("type", "clear_history");
-                            sendWsFrame(0x1, clr.toString().getBytes(StandardCharsets.UTF_8));
-                        } catch (Throwable ignored) {
-                        }
-                        Toast.makeText(this, "Riwayat chat dihapus", Toast.LENGTH_SHORT).show();
-                    })
-                    .show();
+                        closeModal();
+                        Toast.makeText(this, "Menyambung ke " + hostIp, Toast.LENGTH_SHORT).show();
+                    }
+                });
+
+                Button btnHost = makeModalBtn("Jadi Host", Color.parseColor("#1970F5"), Color.WHITE);
+                btnHost.setOnClickListener(v -> {
+                    netMode = MODE_HOST;
+                    getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
+                        .edit().putString("net_mode", netMode).apply();
+                    restartNetwork();
+                    closeModal();
+                    Toast.makeText(this, "Host aktif di " + myIp, Toast.LENGTH_LONG).show();
+                });
+
+                LinearLayout.LayoutParams p1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                p1.rightMargin = (int) (6 * density);
+                LinearLayout.LayoutParams p2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                p2.rightMargin = (int) (6 * density);
+                LinearLayout.LayoutParams p3 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                row.addView(btnClear, p1);
+                row.addView(btnJoin, p2);
+                row.addView(btnHost, p3);
+                modalCard.addView(row);
+
+                if (chatScroll != null) {
+                    chatScroll.animate().alpha(0.12f).setDuration(150).start();
+                }
+                modalRoot.setVisibility(View.VISIBLE);
+                modalCard.post(() -> {
+                    int[] loc = new int[2];
+                    modalCard.getLocationOnScreen(loc);
+                    float hw = modalCard.getWidth() * 0.5f;
+                    float hh = modalCard.getHeight() * 0.5f;
+                    nativeSetModalBounds(loc[0] + hw, loc[1] + hh, hw, hh);
+                    nativeSetModalOpen(true);
+                });
             } catch (Throwable ignored) {
             }
         });
@@ -1208,6 +1324,7 @@ public class MainActivity extends NativeActivity {
         appRunning = false;
         stopNetwork();
         if (overlaysAttached && windowManager != null) {
+            try { windowManager.removeViewImmediate(modalRoot); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(chatScroll); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(fpsLabel); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(msgInput); } catch (Throwable ignored) {}
