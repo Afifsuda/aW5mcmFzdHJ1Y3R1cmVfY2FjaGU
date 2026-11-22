@@ -221,7 +221,6 @@ uniform float isFocused;
 uniform float sendPulse;
 uniform vec2 tilt;
 uniform float fpsBoxHalfW;
-uniform int uFps;
 
 out vec4 fragColor;
 
@@ -234,25 +233,6 @@ float sdSegment(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a, ba = b - a;
     float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
     return length(pa - ba * h);
-}
-
-float sdDigit(vec2 p, int d, vec2 sz, float thick) {
-    int masks[10] = int[10](0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F);
-    int m = masks[clamp(d, 0, 9)];
-    float hw = sz.x * 0.5;
-    float hh = sz.y * 0.5;
-    float gap = thick * 1.15;
-    float dist = 1e5;
-
-    if ((m & 1) != 0)  dist = min(dist, sdSegment(p, vec2(-hw + gap, -hh), vec2(hw - gap, -hh)));
-    if ((m & 2) != 0)  dist = min(dist, sdSegment(p, vec2(hw, -hh + gap), vec2(hw, -gap)));
-    if ((m & 4) != 0)  dist = min(dist, sdSegment(p, vec2(hw, gap), vec2(hw, hh - gap)));
-    if ((m & 8) != 0)  dist = min(dist, sdSegment(p, vec2(-hw + gap, hh), vec2(hw - gap, hh)));
-    if ((m & 16) != 0) dist = min(dist, sdSegment(p, vec2(-hw, gap), vec2(-hw, hh - gap)));
-    if ((m & 32) != 0) dist = min(dist, sdSegment(p, vec2(-hw, -hh + gap), vec2(-hw, -gap)));
-    if ((m & 64) != 0) dist = min(dist, sdSegment(p, vec2(-hw + gap, 0.0), vec2(hw - gap, 0.0)));
-
-    return dist - thick;
 }
 
 float samplePlusIcon(vec2 p, float scale) {
@@ -404,39 +384,6 @@ void main() {
         float dPillCrevice = sdRoundBox(pFps - vec2(0.0, 1.4 * dpr), vec2(fpsBoxHalfW, 14.0 * dpr), 14.0 * dpr);
 
         col = render3DMatteSurface(col, envBounce, pFps, dPill, dPillPenumbra, dPillCrevice, 0.0, 0.0, true, false, 1);
-
-        if (dPill < -1.0 * dpr) {
-            // Dot + SDF FPS digits inside pill
-            vec2 dotPos = vec2(-fpsBoxHalfW + 14.0 * dpr, 0.0);
-            float dDot = length(pFps - dotPos) - (2.6 * dpr);
-            vec3 dotCol = (uFps >= 55) ? vec3(0.13, 0.72, 0.38)
-                        : (uFps >= 30) ? vec3(0.92, 0.65, 0.12)
-                                       : vec3(0.90, 0.28, 0.15);
-            col = mix(col, dotCol, 1.0 - smoothstep(-0.75, 0.75, dDot));
-
-            int fpsClamped = clamp(uFps, 0, 999);
-            int d0 = (fpsClamped / 100) % 10;
-            int d1 = (fpsClamped / 10) % 10;
-            int d2 = fpsClamped % 10;
-
-            vec2 digSz = vec2(6.5 * dpr, 11.0 * dpr);
-            float thick = 1.05 * dpr;
-            float stepX = 9.5 * dpr;
-            float startX = -3.0 * dpr;
-
-            float dText = 1e5;
-            if (fpsClamped >= 100) {
-                dText = min(dText, sdDigit(pFps - vec2(startX, 0.0), d0, digSz, thick));
-            }
-            if (fpsClamped >= 10) {
-                dText = min(dText, sdDigit(pFps - vec2(startX + stepX, 0.0), d1, digSz, thick));
-            }
-            dText = min(dText, sdDigit(pFps - vec2(startX + stepX * 2.0, 0.0), d2, digSz, thick));
-
-            float textAlpha = 1.0 - smoothstep(-0.75, 0.75, dText);
-            col = mix(col, vec3(0.078, 0.098, 0.137), textAlpha * 0.92);
-        }
-
         fragColor = vec4(col, 1.0);
         return;
     }
@@ -582,7 +529,6 @@ struct Uniforms {
     send_pulse: i32,
     tilt: i32,
     fps_box_half_w: i32,
-    u_fps: i32,
 }
 
 struct GlState {
@@ -731,7 +677,6 @@ impl GlState {
                 send_pulse: loc("sendPulse"),
                 tilt: loc("tilt"),
                 fps_box_half_w: loc("fpsBoxHalfW"),
-                u_fps: loc("uFps"),
             },
             width,
             height,
@@ -782,7 +727,6 @@ impl GlState {
         btn_press: f32,
         focused: f32,
         send_pulse: f32,
-        fps: i32,
     ) {
         if self.surface.is_null() {
             return;
@@ -816,7 +760,6 @@ impl GlState {
         glUniform1f(self.u.send_pulse, send_pulse);
         glUniform2f(self.u.tilt, 0.0, 0.0);
         glUniform1f(self.u.fps_box_half_w, 34.0 * dpr);
-        glUniform1i(self.u.u_fps, fps);
 
         glDrawArrays(GL_TRIANGLES, 0, 3);
         eglSwapBuffers(self.display, self.surface);
@@ -1156,14 +1099,25 @@ fn android_main(app: AndroidApp) {
                         btn_press_val,
                         focus_val,
                         send_pulse_val,
-                        current_fps,
                     );
                 }
             }
             frame_count += 1;
             let fps_elapsed = now.duration_since(fps_timer).as_secs_f32();
             if fps_elapsed >= 0.35 {
-                current_fps = (frame_count as f32 / fps_elapsed).round() as i32;
+                let new_fps = (frame_count as f32 / fps_elapsed).round() as i32;
+                if new_fps != current_fps {
+                    current_fps = new_fps;
+                    if let Some(ref vm) = vm {
+                        call_java_void(
+                            vm,
+                            activity_ptr,
+                            "updateFpsLabel",
+                            "(I)V",
+                            &[JValue::Int(current_fps)],
+                        );
+                    }
+                }
                 frame_count = 0;
                 fps_timer = now;
             }

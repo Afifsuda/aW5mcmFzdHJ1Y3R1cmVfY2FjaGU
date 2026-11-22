@@ -9,6 +9,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Rect;
+import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -81,6 +82,7 @@ public class MainActivity extends NativeActivity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private EditText msgInput;
+    private TextView fpsLabel;
     private float density = 1.0f;
     private int lastLeft = -1, lastTop = -1, lastWidth = -1, lastHeight = -1;
 
@@ -122,6 +124,22 @@ public class MainActivity extends NativeActivity {
 
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(100, (int) (52 * density));
         overlay.addView(msgInput, lp);
+
+        fpsLabel = new TextView(this);
+        fpsLabel.setText("60fps");
+        fpsLabel.setTextColor(Color.parseColor("#141923"));
+        fpsLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        fpsLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        fpsLabel.setIncludeFontPadding(false);
+        fpsLabel.setGravity(Gravity.CENTER);
+        FrameLayout.LayoutParams fpsLp = new FrameLayout.LayoutParams(
+            (int) (68 * density),
+            (int) (28 * density),
+            Gravity.TOP | Gravity.CENTER_HORIZONTAL
+        );
+        fpsLp.topMargin = (int) (30 * density);
+        overlay.addView(fpsLabel, fpsLp);
+
         addContentView(overlay, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
@@ -192,6 +210,14 @@ public class MainActivity extends NativeActivity {
             if (msgInput != null && msgInput.getText().length() > 0) {
                 msgInput.setText("");
                 nativeSetTargetCapHeight(52f);
+            }
+        });
+    }
+
+    public void updateFpsLabel(final int fps) {
+        uiHandler.post(() -> {
+            if (fpsLabel != null) {
+                fpsLabel.setText(fps + "fps");
             }
         });
     }
