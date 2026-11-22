@@ -24,6 +24,7 @@ static PENDING_WALLPAPER: Mutex<Option<PendingWallpaper>> = Mutex::new(None);
 static TARGET_CAP_HEIGHT_DP: AtomicU32 = AtomicU32::new(0x42500000); // 52.0f32.to_bits()
 static IS_FOCUSED: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_INSET_PX: AtomicI32 = AtomicI32::new(0);
+static JAVA_CAP_PRESSED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeOnWallpaperLoaded(
@@ -69,6 +70,15 @@ pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetKeyboardIn
     inset_px: jint,
 ) {
     KEYBOARD_INSET_PX.store(inset_px, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetCapPressed(
+    _env: JNIEnv,
+    _class: JClass,
+    pressed: jboolean,
+) {
+    JAVA_CAP_PRESSED.store(pressed != 0, Ordering::Relaxed);
 }
 
 // --- Minimal EGL & GLESv3 FFI ---
@@ -1062,8 +1072,9 @@ fn android_main(app: AndroidApp) {
         }
 
         let focused = if IS_FOCUSED.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+        let any_cap_pressed = cap_pressed || JAVA_CAP_PRESSED.load(Ordering::Relaxed);
         plus_press_val += ((if plus_pressed { 1.0 } else { 0.0 }) - plus_press_val) * (dt * 18.0).min(1.0);
-        cap_press_val += ((if cap_pressed { 1.0 } else { 0.0 }) - cap_press_val) * (dt * 18.0).min(1.0);
+        cap_press_val += ((if any_cap_pressed { 1.0 } else { 0.0 }) - cap_press_val) * (dt * 18.0).min(1.0);
         btn_press_val += ((if btn_pressed { 1.0 } else { 0.0 }) - btn_press_val) * (dt * 18.0).min(1.0);
         focus_val += (focused - focus_val) * (dt * 12.0).min(1.0);
         plus_pulse_val *= (0.86_f32).powf(dt * 60.0);

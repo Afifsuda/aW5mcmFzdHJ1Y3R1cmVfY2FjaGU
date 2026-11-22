@@ -48,6 +48,7 @@ public class MainActivity extends NativeActivity {
     private static native void nativeSetTargetCapHeight(float heightDp);
     private static native void nativeSetFocused(boolean focused);
     private static native void nativeSetKeyboardInset(int insetPx);
+    private static native void nativeSetCapPressed(boolean pressed);
 
     private static final String[] WALLPAPERS = {
         "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1080&q=85",
@@ -112,6 +113,7 @@ public class MainActivity extends NativeActivity {
         fpsLabel.setBackgroundColor(Color.TRANSPARENT);
 
         msgInput = new EditText(this);
+        msgInput.setVisibility(View.INVISIBLE);
         msgInput.setBackgroundColor(Color.TRANSPARENT);
         msgInput.setHint("Tulis pesan...");
         msgInput.setHintTextColor(Color.parseColor("#768296"));
@@ -124,6 +126,17 @@ public class MainActivity extends NativeActivity {
         );
         msgInput.setMaxLines(6);
         msgInput.setVerticalScrollBarEnabled(true);
+        msgInput.setOnTouchListener((v, event) -> {
+            int action = event.getActionMasked();
+            if (action == android.view.MotionEvent.ACTION_DOWN) {
+                nativeSetCapPressed(true);
+                v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                focusInput();
+            } else if (action == android.view.MotionEvent.ACTION_UP || action == android.view.MotionEvent.ACTION_CANCEL) {
+                nativeSetCapPressed(false);
+            }
+            return false;
+        });
         msgInput.setOnFocusChangeListener((v, hasFocus) -> nativeSetFocused(hasFocus));
         msgInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -220,6 +233,9 @@ public class MainActivity extends NativeActivity {
                     windowManager.updateViewLayout(msgInput, inputLp);
                 } catch (Throwable ignored) {
                 }
+            }
+            if (msgInput.getVisibility() != View.VISIBLE && widthPx > 60 && targetY > 0) {
+                msgInput.setVisibility(View.VISIBLE);
             }
         });
     }
