@@ -488,7 +488,7 @@ const CAP_CORNER_RADIUS: f32 = 26.0;
 
 fn get_layout(sw_dp: f32, sh_dp: f32, cap_height_dp: f32, keyboard_dp: f32) -> Layout {
     let margin_side = 14.0;
-    let margin_bottom = 22.0 + keyboard_dp;
+    let margin_bottom = if keyboard_dp > 0.0 { 8.0 + keyboard_dp } else { 10.0 };
     let inset = 6.0;
     let btn_radius = (BASE_CAP_HEIGHT * 0.5) - inset;
 
@@ -1008,7 +1008,7 @@ fn android_main(app: AndroidApp) {
                                     send_pulse_val = 1.0;
                                     if let Some(ref vm) = vm {
                                         call_java_void(vm, activity_ptr, "vibrateHaptic", "()V", &[]);
-                                        call_java_void(vm, activity_ptr, "clearInput", "()V", &[]);
+                                        call_java_void(vm, activity_ptr, "sendMessage", "()V", &[]);
                                     }
                                 }
                             } else if cap_pressed {

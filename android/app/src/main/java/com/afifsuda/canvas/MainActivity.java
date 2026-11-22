@@ -11,6 +11,7 @@ import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -18,26 +19,39 @@ import android.os.Looper;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.util.Base64;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 
 public class MainActivity extends NativeActivity {
     static {
@@ -49,6 +63,9 @@ public class MainActivity extends NativeActivity {
     private static native void nativeSetFocused(boolean focused);
     private static native void nativeSetKeyboardInset(int insetPx);
     private static native void nativeSetCapPressed(boolean pressed);
+
+    private static final String RELAY_HOST = "aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev";
+    private static final String RELAY_PATH = "/?room=1234";
 
     private static final String[] WALLPAPERS = {
         "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1080&q=85",
@@ -83,14 +100,27 @@ public class MainActivity extends NativeActivity {
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService wsSendExecutor = Executors.newSingleThreadExecutor();
+    private final SecureRandom rng = new SecureRandom();
+
     private WindowManager windowManager;
     private EditText msgInput;
     private TextView fpsLabel;
+    private ScrollView chatScroll;
+    private LinearLayout chatContainer;
     private WindowManager.LayoutParams fpsLp;
     private WindowManager.LayoutParams inputLp;
+    private WindowManager.LayoutParams chatLp;
+
     private boolean overlaysAttached = false;
     private float density = 1.0f;
     private int lastLeft = -1, lastTop = -1, lastWidth = -1, lastHeight = -1;
+    private int lastChatHeight = -1;
+
+    private volatile boolean wsRunning = true;
+    private volatile SSLSocket wsSocket;
+    private volatile OutputStream wsOut;
+    private Thread wsThread;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -112,6 +142,22 @@ public class MainActivity extends NativeActivity {
         fpsLabel.setGravity(Gravity.CENTER);
         fpsLabel.setBackgroundColor(Color.TRANSPARENT);
 
+        chatScroll = new ScrollView(this);
+        chatScroll.setVisibility(View.INVISIBLE);
+        chatScroll.setBackgroundColor(Color.TRANSPARENT);
+        chatScroll.setVerticalScrollBarEnabled(false);
+        chatScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+
+        chatContainer = new LinearLayout(this);
+        chatContainer.setOrientation(LinearLayout.VERTICAL);
+        int padH = (int) (14 * density);
+        int padV = (int) (8 * density);
+        chatContainer.setPadding(padH, padV, padH, padV);
+        chatScroll.addView(chatContainer, new ScrollView.LayoutParams(
+            ScrollView.LayoutParams.MATCH_PARENT,
+            ScrollView.LayoutParams.WRAP_CONTENT
+        ));
+
         msgInput = new EditText(this);
         msgInput.setVisibility(View.INVISIBLE);
         msgInput.setBackgroundColor(Color.TRANSPARENT);
@@ -128,11 +174,11 @@ public class MainActivity extends NativeActivity {
         msgInput.setVerticalScrollBarEnabled(true);
         msgInput.setOnTouchListener((v, event) -> {
             int action = event.getActionMasked();
-            if (action == android.view.MotionEvent.ACTION_DOWN) {
+            if (action == MotionEvent.ACTION_DOWN) {
                 nativeSetCapPressed(true);
                 v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
                 focusInput();
-            } else if (action == android.view.MotionEvent.ACTION_UP || action == android.view.MotionEvent.ACTION_CANCEL) {
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 nativeSetCapPressed(false);
             }
             return false;
@@ -158,6 +204,8 @@ public class MainActivity extends NativeActivity {
                 nativeSetKeyboardInset(keypad > screenH * 0.12 ? keypad : 0);
             }
         });
+
+        startWebSocketLoop();
     }
 
     private void attachOverlays() {
@@ -181,6 +229,20 @@ public class MainActivity extends NativeActivity {
         fpsLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
         fpsLp.y = (int) (30 * density);
 
+        chatLp = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            (int) (200 * density),
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        );
+        chatLp.token = token;
+        chatLp.gravity = Gravity.TOP | Gravity.START;
+        chatLp.x = 0;
+        chatLp.y = (int) (70 * density);
+
         inputLp = new WindowManager.LayoutParams(
             100,
             (int) (52 * density),
@@ -196,6 +258,7 @@ public class MainActivity extends NativeActivity {
         inputLp.y = 0;
 
         try {
+            windowManager.addView(chatScroll, chatLp);
             windowManager.addView(fpsLabel, fpsLp);
             windowManager.addView(msgInput, inputLp);
             overlaysAttached = true;
@@ -204,6 +267,197 @@ public class MainActivity extends NativeActivity {
             t.printStackTrace(new PrintWriter(sw));
             showErrorAndCopy("Overlay attach error:\n" + sw.toString());
         }
+    }
+
+    private void addChatBubble(final String text, final boolean isSelf) {
+        uiHandler.post(() -> {
+            if (chatContainer == null || chatScroll == null) return;
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(isSelf ? Gravity.END : Gravity.START);
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            );
+            rowLp.bottomMargin = (int) (8 * density);
+
+            TextView bubble = new TextView(this);
+            bubble.setText(text);
+            bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            bubble.setTextColor(isSelf ? Color.WHITE : Color.parseColor("#111622"));
+            bubble.setMaxWidth((int) (270 * density));
+            int px = (int) (15 * density);
+            int py = (int) (10 * density);
+            bubble.setPadding(px, py, px, py);
+
+            GradientDrawable bg = new GradientDrawable();
+            if (isSelf) {
+                bg.setColor(Color.parseColor("#1970F5"));
+                float r = 18 * density;
+                float sm = 5 * density;
+                bg.setCornerRadii(new float[]{r, r, r, r, sm, sm, r, r});
+            } else {
+                bg.setColor(Color.parseColor("#F5F8FC"));
+                bg.setStroke((int) Math.max(1, density), Color.parseColor("#D8E0EC"));
+                float r = 18 * density;
+                float sm = 5 * density;
+                bg.setCornerRadii(new float[]{r, r, r, r, r, r, sm, sm});
+            }
+            bubble.setBackground(bg);
+            bubble.setElevation(3 * density);
+
+            row.addView(bubble);
+            chatContainer.addView(row, rowLp);
+            chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
+        });
+    }
+
+    private void startWebSocketLoop() {
+        wsThread = new Thread(() -> {
+            while (wsRunning) {
+                try {
+                    SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                    SSLSocket socket = (SSLSocket) factory.createSocket(RELAY_HOST, 443);
+                    socket.setSoTimeout(0);
+                    socket.startHandshake();
+
+                    byte[] keyBytes = new byte[16];
+                    rng.nextBytes(keyBytes);
+                    String wsKey = Base64.encodeToString(keyBytes, Base64.NO_WRAP);
+
+                    OutputStream out = socket.getOutputStream();
+                    String req = "GET " + RELAY_PATH + " HTTP/1.1\r\n"
+                        + "Host: " + RELAY_HOST + "\r\n"
+                        + "Upgrade: websocket\r\n"
+                        + "Connection: Upgrade\r\n"
+                        + "Sec-WebSocket-Key: " + wsKey + "\r\n"
+                        + "Sec-WebSocket-Version: 13\r\n\r\n";
+                    out.write(req.getBytes(StandardCharsets.US_ASCII));
+                    out.flush();
+
+                    DataInputStream in = new DataInputStream(socket.getInputStream());
+                    String statusLine = readHttpLine(in);
+                    if (statusLine == null || !statusLine.contains("101")) {
+                        socket.close();
+                        Thread.sleep(3000);
+                        continue;
+                    }
+                    String line;
+                    while ((line = readHttpLine(in)) != null && !line.isEmpty()) {
+                        // Consume headers
+                    }
+
+                    wsSocket = socket;
+                    wsOut = out;
+
+                    while (wsRunning) {
+                        int b0 = in.readUnsignedByte();
+                        int b1 = in.readUnsignedByte();
+                        int opcode = b0 & 0x0F;
+                        boolean masked = (b1 & 0x80) != 0;
+                        long len = b1 & 0x7F;
+                        if (len == 126) {
+                            len = in.readUnsignedShort();
+                        } else if (len == 127) {
+                            len = in.readLong();
+                        }
+                        byte[] mask = new byte[4];
+                        if (masked) in.readFully(mask);
+                        if (len > 1024 * 1024) break;
+
+                        byte[] payload = new byte[(int) len];
+                        in.readFully(payload);
+                        if (masked) {
+                            for (int i = 0; i < payload.length; i++) {
+                                payload[i] ^= mask[i % 4];
+                            }
+                        }
+
+                        if (opcode == 0x8) {
+                            break;
+                        } else if (opcode == 0x9) {
+                            sendWsFrame(0xA, payload);
+                        } else if (opcode == 0x1) {
+                            String msg = new String(payload, StandardCharsets.UTF_8);
+                            try {
+                                JSONObject obj = new JSONObject(msg);
+                                if ("chat".equals(obj.optString("type"))) {
+                                    String txt = obj.optString("text", "").trim();
+                                    if (!txt.isEmpty()) {
+                                        addChatBubble(txt, false);
+                                    }
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    wsOut = null;
+                    try {
+                        if (wsSocket != null) wsSocket.close();
+                    } catch (Throwable ignored) {
+                    }
+                    wsSocket = null;
+                }
+                if (wsRunning) {
+                    try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                }
+            }
+        }, "AgyWsClient");
+        wsThread.start();
+    }
+
+    private String readHttpLine(DataInputStream in) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int prev = -1;
+        while (true) {
+            int b = in.read();
+            if (b == -1) return null;
+            if (b == '\n') {
+                byte[] arr = baos.toByteArray();
+                int len = (prev == '\r' && arr.length > 0) ? arr.length - 1 : arr.length;
+                return new String(arr, 0, len, StandardCharsets.US_ASCII);
+            }
+            baos.write(b);
+            prev = b;
+        }
+    }
+
+    private void sendWsFrame(int opcode, byte[] payload) {
+        OutputStream out = wsOut;
+        if (out == null) return;
+        wsSendExecutor.execute(() -> {
+            try {
+                OutputStream o = wsOut;
+                if (o == null) return;
+                ByteArrayOutputStream frame = new ByteArrayOutputStream();
+                frame.write(0x80 | (opcode & 0x0F));
+                int len = payload.length;
+                if (len <= 125) {
+                    frame.write(0x80 | len);
+                } else if (len <= 65535) {
+                    frame.write(0x80 | 126);
+                    frame.write((len >> 8) & 0xFF);
+                    frame.write(len & 0xFF);
+                } else {
+                    frame.write(0x80 | 127);
+                    for (int i = 7; i >= 0; i--) {
+                        frame.write((int) (((long) len >> (i * 8)) & 0xFF));
+                    }
+                }
+                byte[] mask = new byte[4];
+                rng.nextBytes(mask);
+                frame.write(mask);
+                for (int i = 0; i < len; i++) {
+                    frame.write(payload[i] ^ mask[i % 4]);
+                }
+                o.write(frame.toByteArray());
+                o.flush();
+            } catch (Throwable ignored) {
+            }
+        });
     }
 
     private void recalcHeight() {
@@ -237,6 +491,24 @@ public class MainActivity extends NativeActivity {
             if (msgInput.getVisibility() != View.VISIBLE && widthPx > 60 && targetY > 0) {
                 msgInput.setVisibility(View.VISIBLE);
             }
+
+            if (chatScroll != null && chatLp != null && targetY > 0) {
+                int chatTop = (int) (70 * density);
+                int chatH = Math.max((int) (40 * density), targetY - chatTop - (int) (10 * density));
+                if (Math.abs(chatH - lastChatHeight) > 2) {
+                    lastChatHeight = chatH;
+                    chatLp.y = chatTop;
+                    chatLp.height = chatH;
+                    try {
+                        windowManager.updateViewLayout(chatScroll, chatLp);
+                    } catch (Throwable ignored) {
+                    }
+                    if (chatScroll.getVisibility() != View.VISIBLE) {
+                        chatScroll.setVisibility(View.VISIBLE);
+                    }
+                    chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
+                }
+            }
         });
     }
 
@@ -268,11 +540,21 @@ public class MainActivity extends NativeActivity {
         });
     }
 
-    public void clearInput() {
+    public void sendMessage() {
         uiHandler.post(() -> {
-            if (msgInput != null && msgInput.getText().length() > 0) {
+            if (msgInput == null) return;
+            String text = msgInput.getText().toString().trim();
+            if (!text.isEmpty()) {
                 msgInput.setText("");
                 nativeSetTargetCapHeight(52f);
+                addChatBubble(text, true);
+                try {
+                    JSONObject obj = new JSONObject();
+                    obj.put("type", "chat");
+                    obj.put("text", text);
+                    sendWsFrame(0x1, obj.toString().getBytes(StandardCharsets.UTF_8));
+                } catch (Throwable ignored) {
+                }
             }
         });
     }
@@ -359,12 +641,16 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
+        wsRunning = false;
+        try { if (wsSocket != null) wsSocket.close(); } catch (Throwable ignored) {}
         if (overlaysAttached && windowManager != null) {
+            try { windowManager.removeViewImmediate(chatScroll); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(fpsLabel); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(msgInput); } catch (Throwable ignored) {}
             overlaysAttached = false;
         }
         executor.shutdownNow();
+        wsSendExecutor.shutdownNow();
         super.onDestroy();
     }
 }
