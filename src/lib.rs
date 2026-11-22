@@ -174,6 +174,7 @@ extern "C" {
     fn glUniform1f(location: i32, v0: f32);
     fn glUniform1i(location: i32, v0: i32);
     fn glUniform2f(location: i32, v0: f32, v1: f32);
+    fn glUniform3f(location: i32, v0: f32, v1: f32, v2: f32);
     fn glGenVertexArrays(n: i32, arrays: *mut u32);
     fn glBindVertexArray(array: u32);
     fn glDrawArrays(mode: u32, first: i32, count: i32);
@@ -231,6 +232,7 @@ uniform float isFocused;
 uniform float sendPulse;
 uniform vec2 tilt;
 uniform float fpsBoxHalfW;
+uniform vec3 uEnvColor;
 
 out vec4 fragColor;
 
@@ -384,10 +386,11 @@ void main() {
     vec2 px = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y);
     vec3 col = sampleScene(px);
 
+    vec3 envBounce = mix(vec3(0.93, 0.945, 0.965), uEnvColor, imgFade);
+
     // --- FPS 3D MATTE PILL DI TENGAH ATAS ---
     float fpsCenterY = 44.0 * dpr;
     if (px.y < 84.0 * dpr && abs(px.x - res.x * 0.5) < (fpsBoxHalfW + 30.0 * dpr)) {
-        vec3 envBounce = sampleScene(vec2(res.x * 0.5, fpsCenterY));
         vec2 pFps = px - vec2(res.x * 0.5, fpsCenterY);
         float dPill = sdRoundBox(pFps, vec2(fpsBoxHalfW, 14.0 * dpr), 14.0 * dpr);
         float dPillPenumbra = sdRoundBox(pFps - vec2(0.0, 4.5 * dpr), vec2(fpsBoxHalfW, 14.0 * dpr), 14.0 * dpr);
@@ -404,8 +407,6 @@ void main() {
         return;
     }
 
-    vec3 barEnvBounce = sampleScene(vec2(px.x, capCenter.y - capHalf.y - 10.0 * dpr));
-
     // --- LAYER 1: EXPANDING CAPSULE INPUT FIELD ---
     vec2 pCap = px - capCenter;
     float capDrop = capPress * 1.4 * dpr;
@@ -418,7 +419,7 @@ void main() {
         float dCapPenumbra = sdRoundBox(pCap - vec2(0.0, 7.0 * dpr) * (1.0 - capPress * 0.5), bCap, rCap);
         float dCapCrevice = sdRoundBox(pCap - vec2(0.0, 1.8 * dpr) * (1.0 - capPress * 0.5), bCap, rCap);
 
-        col = render3DMatteSurface(col, barEnvBounce, pCapPhys, dCap, dCapPenumbra, dCapCrevice, capPress, isFocused, true, false, 0);
+        col = render3DMatteSurface(col, envBounce, pCapPhys, dCap, dCapPenumbra, dCapCrevice, capPress, isFocused, true, false, 0);
     }
 
     // --- LAYER 2: TOMBOL + DI SISI KIRI ---
@@ -431,7 +432,7 @@ void main() {
         float dPlusPenumbra = length(pPlus - vec2(0.0, 3.2 * dpr) * (1.0 - plusPress * 0.6)) - rPlus;
         float dPlusCrevice = length(pPlus - vec2(0.0, 1.0 * dpr) * (1.0 - plusPress * 0.6)) - rPlus;
 
-        col = render3DMatteSurface(col, barEnvBounce, pPlusPhys, dPlus, dPlusPenumbra, dPlusCrevice, plusPress, plusPulse, false, false, 1);
+        col = render3DMatteSurface(col, envBounce, pPlusPhys, dPlus, dPlusPenumbra, dPlusCrevice, plusPress, plusPulse, false, false, 1);
 
         if (dPlus < -1.0 * dpr) {
             float angle = plusPulse * 1.5707963;
@@ -452,7 +453,7 @@ void main() {
         float dBtnPenumbra = length(pBtn - vec2(0.0, 3.2 * dpr) * (1.0 - btnPress * 0.6)) - rBtn;
         float dBtnCrevice = length(pBtn - vec2(0.0, 1.0 * dpr) * (1.0 - btnPress * 0.6)) - rBtn;
 
-        col = render3DMatteSurface(col, barEnvBounce, pBtnPhys, dBtn, dBtnPenumbra, dBtnCrevice, btnPress, sendPulse, false, true, 1);
+        col = render3DMatteSurface(col, envBounce, pBtnPhys, dBtn, dBtnPenumbra, dBtnCrevice, btnPress, sendPulse, false, true, 1);
 
         if (dBtn < -1.0 * dpr) {
             vec2 pIcon = pBtnPhys + vec2(0.0, sendPulse * 4.0 * dpr);
@@ -539,6 +540,7 @@ struct Uniforms {
     send_pulse: i32,
     tilt: i32,
     fps_box_half_w: i32,
+    u_env_color: i32,
 }
 
 struct GlState {
@@ -551,6 +553,7 @@ struct GlState {
     bg_tex: u32,
     img_w: f32,
     img_h: f32,
+    env_rgb: [f32; 3],
     u: Uniforms,
     width: i32,
     height: i32,
@@ -666,6 +669,7 @@ impl GlState {
             bg_tex,
             img_w: 1.0,
             img_h: 1.0,
+            env_rgb: [0.93, 0.945, 0.965],
             u: Uniforms {
                 res: loc("res"),
                 img_res: loc("imgRes"),
@@ -687,6 +691,7 @@ impl GlState {
                 send_pulse: loc("sendPulse"),
                 tilt: loc("tilt"),
                 fps_box_half_w: loc("fpsBoxHalfW"),
+                u_env_color: loc("uEnvColor"),
             },
             width,
             height,
@@ -708,6 +713,28 @@ impl GlState {
         );
         self.img_w = w.max(1) as f32;
         self.img_h = h.max(1) as f32;
+        if rgba.len() >= 4 {
+            let step = (rgba.len() / 4 / 16).max(1);
+            let mut r_sum = 0u64;
+            let mut g_sum = 0u64;
+            let mut b_sum = 0u64;
+            let mut cnt = 0u64;
+            let mut idx = 0;
+            while idx + 3 < rgba.len() {
+                r_sum += rgba[idx] as u64;
+                g_sum += rgba[idx + 1] as u64;
+                b_sum += rgba[idx + 2] as u64;
+                cnt += 1;
+                idx += step * 4;
+            }
+            if cnt > 0 {
+                self.env_rgb = [
+                    (r_sum as f32 / cnt as f32) / 255.0,
+                    (g_sum as f32 / cnt as f32) / 255.0,
+                    (b_sum as f32 / cnt as f32) / 255.0,
+                ];
+            }
+        }
     }
 
     unsafe fn recreate_surface(&mut self, window: *mut c_void, width: i32, height: i32) {
@@ -770,6 +797,7 @@ impl GlState {
         glUniform1f(self.u.send_pulse, send_pulse);
         glUniform2f(self.u.tilt, 0.0, 0.0);
         glUniform1f(self.u.fps_box_half_w, 34.0 * dpr);
+        glUniform3f(self.u.u_env_color, self.env_rgb[0], self.env_rgb[1], self.env_rgb[2]);
 
         glDrawArrays(GL_TRIANGLES, 0, 3);
         eglSwapBuffers(self.display, self.surface);
@@ -912,12 +940,29 @@ fn android_main(app: AndroidApp) {
     let mut fps_timer = Instant::now();
     let mut frame_count: u32 = 0;
     let mut current_fps: i32 = 60;
+    let mut needs_redraw = true;
+    let mut last_sync: (i32, i32, i32, i32, i32) = (-1, -1, -1, -1, -1);
 
     while running {
-        let timeout = if has_window {
+        let still_animating_prev = (f32::from_bits(TARGET_CAP_HEIGHT_DP.load(Ordering::Relaxed)) - current_cap_height).abs() > 0.1
+            || (img_fade > 0.0 && img_fade < 1.0)
+            || plus_pressed
+            || cap_pressed
+            || JAVA_CAP_PRESSED.load(Ordering::Relaxed)
+            || btn_pressed
+            || plus_press_val > 0.005
+            || cap_press_val > 0.005
+            || btn_press_val > 0.005
+            || plus_pulse_val > 0.005
+            || send_pulse_val > 0.005
+            || (focus_val - if IS_FOCUSED.load(Ordering::Relaxed) { 1.0 } else { 0.0 }).abs() > 0.005;
+
+        let timeout = if !has_window {
+            None
+        } else if needs_redraw || still_animating_prev {
             Some(Duration::ZERO)
         } else {
-            None
+            Some(Duration::from_millis(80))
         };
 
         app.poll_events(timeout, |event| match event {
@@ -941,12 +986,14 @@ fn android_main(app: AndroidApp) {
                             }
                         }
                         has_window = true;
+                        needs_redraw = true;
                     }
                 }
                 MainEvent::WindowResized { .. } | MainEvent::RedrawNeeded { .. } => {
                     if let (Some(ref mut state), Some(win)) = (&mut gl, app.native_window()) {
                         state.width = win.width().max(1);
                         state.height = win.height().max(1);
+                        needs_redraw = true;
                     }
                 }
                 MainEvent::TerminateWindow { .. } => {
@@ -1082,23 +1129,43 @@ fn android_main(app: AndroidApp) {
         send_pulse_val *= (0.86_f32).powf(dt * 60.0);
 
         let updated_layout = get_layout(sw_dp, sh_dp, current_cap_height, kb_dp);
-        if let Some(ref vm) = vm {
-            call_java_void(
-                vm,
-                activity_ptr,
-                "syncInputLayout",
-                "(IIIIF)V",
-                &[
-                    JValue::Int((updated_layout.input_left * dpr).round() as i32),
-                    JValue::Int((updated_layout.input_top * dpr).round() as i32),
-                    JValue::Int((updated_layout.input_width * dpr).round() as i32),
-                    JValue::Int((updated_layout.input_height * dpr).round() as i32),
-                    JValue::Float(cap_press_val * 1.4 * dpr),
-                ],
-            );
+        let sync_tuple = (
+            (updated_layout.input_left * dpr).round() as i32,
+            (updated_layout.input_top * dpr).round() as i32,
+            (updated_layout.input_width * dpr).round() as i32,
+            (updated_layout.input_height * dpr).round() as i32,
+            (cap_press_val * 1.4 * dpr).round() as i32,
+        );
+        if sync_tuple != last_sync {
+            last_sync = sync_tuple;
+            needs_redraw = true;
+            if let Some(ref vm) = vm {
+                call_java_void(
+                    vm,
+                    activity_ptr,
+                    "syncInputLayout",
+                    "(IIIIF)V",
+                    &[
+                        JValue::Int(sync_tuple.0),
+                        JValue::Int(sync_tuple.1),
+                        JValue::Int(sync_tuple.2),
+                        JValue::Int(sync_tuple.3),
+                        JValue::Float(cap_press_val * 1.4 * dpr),
+                    ],
+                );
+            }
         }
 
-        if has_window {
+        let still_animating = (target_cap_h - current_cap_height).abs() > 0.1
+            || (img_fade > 0.0 && img_fade < 1.0)
+            || (plus_press_val - if plus_pressed { 1.0 } else { 0.0 }).abs() > 0.003
+            || (cap_press_val - if any_cap_pressed { 1.0 } else { 0.0 }).abs() > 0.003
+            || (btn_press_val - if btn_pressed { 1.0 } else { 0.0 }).abs() > 0.003
+            || (focus_val - focused).abs() > 0.003
+            || plus_pulse_val > 0.003
+            || send_pulse_val > 0.003;
+
+        if has_window && (needs_redraw || still_animating) {
             if let Some(ref state) = gl {
                 unsafe {
                     state.draw(
@@ -1114,10 +1181,11 @@ fn android_main(app: AndroidApp) {
                     );
                 }
             }
+            needs_redraw = false;
             frame_count += 1;
             let fps_elapsed = now.duration_since(fps_timer).as_secs_f32();
             if fps_elapsed >= 0.35 {
-                let new_fps = (frame_count as f32 / fps_elapsed).round() as i32;
+                let new_fps = (frame_count as f32 / fps_elapsed).round().max(1.0) as i32;
                 if new_fps != current_fps {
                     current_fps = new_fps;
                     if let Some(ref vm) = vm {
