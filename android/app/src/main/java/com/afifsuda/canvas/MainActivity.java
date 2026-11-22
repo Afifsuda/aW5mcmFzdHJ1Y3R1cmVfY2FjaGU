@@ -13,6 +13,7 @@ import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -47,9 +48,12 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -62,7 +66,9 @@ import java.text.SimpleDateFormat;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -84,6 +90,7 @@ public class MainActivity extends NativeActivity {
     private static final String RELAY_HOST = "aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev";
     private static final String RELAY_PATH = "/?room=1234";
     private static final int LOCAL_PORT = 8080;
+    private static final int DISCOVERY_PORT = 8081;
 
     private static final String MODE_HOST = "host";
     private static final String MODE_CLIENT = "client";
@@ -147,6 +154,9 @@ public class MainActivity extends NativeActivity {
 
     private volatile ServerSocket hostServerSocket;
     private final CopyOnWriteArrayList<HostPeer> hostPeers = new CopyOnWriteArrayList<>();
+    private final ConcurrentHashMap<String, String> discoveredHosts = new ConcurrentHashMap<>();
+    private volatile String lastNetError = "";
+    private Thread discoveryThread;
 
     private final Object historyLock = new Object();
     private JSONArray chatHistory = new JSONArray();
@@ -249,6 +259,7 @@ public class MainActivity extends NativeActivity {
         });
 
         restartNetwork();
+        startUdpDiscovery();
     }
 
     private void attachOverlays() {
@@ -385,6 +396,7 @@ public class MainActivity extends NativeActivity {
     }
 
     private void startHostServerLoop() {
+        lastNetError = "";
         netThread = new Thread(() -> {
             try {
                 ServerSocket ss = new ServerSocket(LOCAL_PORT);
@@ -394,12 +406,70 @@ public class MainActivity extends NativeActivity {
                     Socket client = ss.accept();
                     new Thread(() -> handleHostPeer(client), "AgyHostPeer").start();
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                lastNetError = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
             } finally {
                 wsConnected = false;
             }
         }, "AgyHostServer");
         netThread.start();
+    }
+
+    private void startUdpDiscovery() {
+        // Listener: discover nearby Host phones on same WiFi/Hotspot
+        discoveryThread = new Thread(() -> {
+            try (DatagramSocket rx = new DatagramSocket(DISCOVERY_PORT)) {
+                rx.setBroadcast(true);
+                rx.setSoTimeout(1500);
+                byte[] buf = new byte[256];
+                while (appRunning) {
+                    try {
+                        DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+                        rx.receive(pkt);
+                        String msg = new String(pkt.getData(), 0, pkt.getLength(), StandardCharsets.UTF_8);
+                        if (msg.startsWith("AGY_HOST|")) {
+                            String senderIp = pkt.getAddress().getHostAddress();
+                            String myIp = getLocalIpv4();
+                            if (senderIp != null && !senderIp.equals(myIp)) {
+                                String[] parts = msg.split("\\|", 3);
+                                String model = parts.length >= 3 ? parts[2] : "HP Host";
+                                discoveredHosts.put(senderIp, model);
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }, "AgyUdpRx");
+        discoveryThread.start();
+
+        // Beacon: broadcast presence every 1.2s when acting as Host
+        new Thread(() -> {
+            try (DatagramSocket tx = new DatagramSocket()) {
+                tx.setBroadcast(true);
+                byte[] msg = ("AGY_HOST|" + LOCAL_PORT + "|" + Build.MODEL).getBytes(StandardCharsets.UTF_8);
+                while (appRunning) {
+                    if (MODE_HOST.equals(netMode)) {
+                        try {
+                            tx.send(new DatagramPacket(msg, msg.length, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT));
+                            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                                if (!nif.isUp() || nif.isLoopback()) continue;
+                                for (InterfaceAddress ia : nif.getInterfaceAddresses()) {
+                                    InetAddress bcast = ia.getBroadcast();
+                                    if (bcast != null) {
+                                        tx.send(new DatagramPacket(msg, msg.length, bcast, DISCOVERY_PORT));
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    try { Thread.sleep(1200); } catch (InterruptedException ignored) {}
+                }
+            } catch (Throwable ignored) {
+            }
+        }, "AgyUdpTx").start();
     }
 
     private void handleHostPeer(Socket socket) {
@@ -491,9 +561,25 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    private String sanitizeIp(String raw) {
+        if (raw == null) return "";
+        String s = raw.trim()
+            .replace("ws://", "")
+            .replace("wss://", "")
+            .replace(",", ".")
+            .replace(";", ":")
+            .replace(" ", "");
+        int slash = s.indexOf('/');
+        if (slash >= 0) s = s.substring(0, slash);
+        int colon = s.indexOf(':');
+        if (colon >= 0) s = s.substring(0, colon);
+        return s;
+    }
+
     private void startClientLoop() {
         final String modeSnapshot = netMode;
-        final String ipSnapshot = hostIp;
+        final String ipSnapshot = sanitizeIp(hostIp);
+        lastNetError = "";
         netThread = new Thread(() -> {
             while (appRunning && modeSnapshot.equals(netMode)) {
                 try {
@@ -509,7 +595,8 @@ public class MainActivity extends NativeActivity {
                         hostHeader = RELAY_HOST;
                         path = RELAY_PATH;
                     } else {
-                        socket = new Socket(ipSnapshot, LOCAL_PORT);
+                        socket = new Socket();
+                        socket.connect(new java.net.InetSocketAddress(ipSnapshot, LOCAL_PORT), 3500);
                         socket.setSoTimeout(0);
                         hostHeader = ipSnapshot + ":" + LOCAL_PORT;
                         path = "/";
@@ -539,9 +626,12 @@ public class MainActivity extends NativeActivity {
                     String line;
                     while ((line = readHttpLine(in)) != null && !line.isEmpty()) {}
 
-                    wsClientSocket = socket;
-                    wsOut = out;
-                    wsConnected = true;
+                    wsSocketUpdate: {
+                        wsClientSocket = socket;
+                        wsOut = out;
+                        wsConnected = true;
+                        lastNetError = "";
+                    }
                     if (MODE_CLOUDFLARE.equals(modeSnapshot)) {
                         recordUsage(1, 0, 0);
                     }
@@ -570,7 +660,8 @@ public class MainActivity extends NativeActivity {
                             handleIncomingJson(new String(payload, StandardCharsets.UTF_8));
                         }
                     }
-                } catch (Throwable ignored) {
+                } catch (Throwable t) {
+                    lastNetError = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
                 } finally {
                     wsConnected = false;
                     wsOut = null;
@@ -941,20 +1032,16 @@ public class MainActivity extends NativeActivity {
                     : MODE_CLIENT.equals(netMode)
                         ? "Client Lokal (" + hostIp + ":" + LOCAL_PORT + ")"
                         : "Cloudflare Relay";
-                String status = wsConnected ? "Terhubung" : "Menyambung...";
-
-                SharedPreferences prefs = getUsagePrefs();
-                int connects = prefs.getInt("connects", 0);
-                int sent = prefs.getInt("sent", 0);
-                int recv = prefs.getInt("recv", 0);
+                String status = wsConnected
+                    ? "Terhubung"
+                    : ("Menyambung..." + (lastNetError.isEmpty() ? "" : "\n(" + lastNetError + ")"));
 
                 String info = "Mode: " + modeLabel
                     + "\nStatus: " + status
-                    + "\nIP WiFi HP ini: " + myIp
-                    + "\n\nCloudflare Usage Hari Ini: " + (connects + (sent + recv + 19) / 20) + " req";
+                    + "\nIP HP ini: " + myIp;
 
                 final EditText ipInput = new EditText(this);
-                ipInput.setHint("IP Host (misal 192.168.1.5)");
+                ipInput.setHint("Atau ketik IP Host (contoh: 192.168.1.5)");
                 ipInput.setText(hostIp);
                 ipInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
 
@@ -966,9 +1053,37 @@ public class MainActivity extends NativeActivity {
                 tv.setText(info);
                 tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
                 box.addView(tv);
+
+                final AlertDialog[] holder = new AlertDialog[1];
+                if (!discoveredHosts.isEmpty()) {
+                    TextView foundTitle = new TextView(this);
+                    foundTitle.setText("\nHost Terdeteksi Otomatis (Klik untuk gabung):");
+                    foundTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                    foundTitle.setTypeface(null, Typeface.BOLD);
+                    box.addView(foundTitle);
+                    for (Map.Entry<String, String> entry : discoveredHosts.entrySet()) {
+                        final String foundIp = entry.getKey();
+                        final String model = entry.getValue();
+                        android.widget.Button btn = new android.widget.Button(this);
+                        btn.setText("Gabung " + model + " (" + foundIp + ")");
+                        btn.setOnClickListener(v -> {
+                            hostIp = foundIp;
+                            netMode = MODE_CLIENT;
+                            getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
+                                .edit()
+                                .putString("net_mode", netMode)
+                                .putString("host_ip", hostIp)
+                                .apply();
+                            restartNetwork();
+                            if (holder[0] != null) holder[0].dismiss();
+                            Toast.makeText(this, "Menyambung ke " + model, Toast.LENGTH_SHORT).show();
+                        });
+                        box.addView(btn);
+                    }
+                }
                 box.addView(ipInput);
 
-                new AlertDialog.Builder(this)
+                holder[0] = new AlertDialog.Builder(this)
                     .setTitle("Koneksi Lokal & Chat")
                     .setView(box)
                     .setPositiveButton("Jadi Host", (d, w) -> {
@@ -976,10 +1091,10 @@ public class MainActivity extends NativeActivity {
                         getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
                             .edit().putString("net_mode", netMode).apply();
                         restartNetwork();
-                        Toast.makeText(this, "Host aktif di " + myIp + ":" + LOCAL_PORT, Toast.LENGTH_LONG).show();
+                        Toast.makeText(this, "Host aktif di " + myIp, Toast.LENGTH_LONG).show();
                     })
-                    .setNeutralButton("Gabung Host", (d, w) -> {
-                        String ip = ipInput.getText().toString().trim();
+                    .setNeutralButton("Gabung Manual", (d, w) -> {
+                        String ip = sanitizeIp(ipInput.getText().toString());
                         if (!ip.isEmpty()) {
                             hostIp = ip;
                             netMode = MODE_CLIENT;
@@ -989,7 +1104,7 @@ public class MainActivity extends NativeActivity {
                                 .putString("host_ip", hostIp)
                                 .apply();
                             restartNetwork();
-                            Toast.makeText(this, "Menyambung ke " + hostIp + ":" + LOCAL_PORT, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(this, "Menyambung ke " + hostIp, Toast.LENGTH_SHORT).show();
                         }
                     })
                     .setNegativeButton("Hapus Chat", (d, w) -> {
