@@ -12,6 +12,7 @@ import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -29,6 +30,7 @@ import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -106,6 +108,7 @@ public class MainActivity extends NativeActivity {
     private WindowManager windowManager;
     private EditText msgInput;
     private TextView fpsLabel;
+    private FrameLayout chatRoot;
     private ScrollView chatScroll;
     private LinearLayout chatContainer;
     private WindowManager.LayoutParams fpsLp;
@@ -142,20 +145,56 @@ public class MainActivity extends NativeActivity {
         fpsLabel.setGravity(Gravity.CENTER);
         fpsLabel.setBackgroundColor(Color.TRANSPARENT);
 
+        chatRoot = new FrameLayout(this);
+        chatRoot.setVisibility(View.INVISIBLE);
+        chatRoot.setBackgroundColor(Color.TRANSPARENT);
+        chatRoot.setClipChildren(false);
+        chatRoot.setClipToPadding(false);
+
         chatScroll = new ScrollView(this);
-        chatScroll.setVisibility(View.INVISIBLE);
         chatScroll.setBackgroundColor(Color.TRANSPARENT);
         chatScroll.setVerticalScrollBarEnabled(false);
         chatScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        chatScroll.setClipChildren(false);
+        chatScroll.setClipToPadding(false);
 
         chatContainer = new LinearLayout(this);
         chatContainer.setOrientation(LinearLayout.VERTICAL);
+        chatContainer.setClipChildren(false);
+        chatContainer.setClipToPadding(false);
         int padH = (int) (14 * density);
-        int padV = (int) (8 * density);
+        int padV = (int) (16 * density);
         chatContainer.setPadding(padH, padV, padH, padV);
         chatScroll.addView(chatContainer, new ScrollView.LayoutParams(
             ScrollView.LayoutParams.MATCH_PARENT,
             ScrollView.LayoutParams.WRAP_CONTENT
+        ));
+        chatRoot.addView(chatScroll, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ));
+
+        // Top & Bottom soft shadow/fade overlay agar chat tidak terpotong kasar
+        View topFade = new View(this);
+        topFade.setBackground(new GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[]{Color.argb(95, 238, 241, 246), Color.argb(0, 238, 241, 246)}
+        ));
+        chatRoot.addView(topFade, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            (int) (22 * density),
+            Gravity.TOP
+        ));
+
+        View bottomFade = new View(this);
+        bottomFade.setBackground(new GradientDrawable(
+            GradientDrawable.Orientation.BOTTOM_TOP,
+            new int[]{Color.argb(115, 238, 241, 246), Color.argb(0, 238, 241, 246)}
+        ));
+        chatRoot.addView(bottomFade, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            (int) (24 * density),
+            Gravity.BOTTOM
         ));
 
         msgInput = new EditText(this);
@@ -258,7 +297,7 @@ public class MainActivity extends NativeActivity {
         inputLp.y = 0;
 
         try {
-            windowManager.addView(chatScroll, chatLp);
+            windowManager.addView(chatRoot, chatLp);
             windowManager.addView(fpsLabel, fpsLp);
             windowManager.addView(msgInput, inputLp);
             overlaysAttached = true;
@@ -287,25 +326,34 @@ public class MainActivity extends NativeActivity {
             bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
             bubble.setTextColor(isSelf ? Color.WHITE : Color.parseColor("#111622"));
             bubble.setMaxWidth((int) (270 * density));
-            int px = (int) (15 * density);
-            int py = (int) (10 * density);
-            bubble.setPadding(px, py, px, py);
+            float r = 18 * density;
+            float sm = 5 * density;
+            float[] radii = isSelf
+                ? new float[]{r, r, r, r, sm, sm, r, r}
+                : new float[]{r, r, r, r, r, r, sm, sm};
+
+            GradientDrawable shadow = new GradientDrawable();
+            shadow.setColor(Color.argb(34, 20, 30, 48));
+            shadow.setCornerRadii(radii);
 
             GradientDrawable bg = new GradientDrawable();
             if (isSelf) {
                 bg.setColor(Color.parseColor("#1970F5"));
-                float r = 18 * density;
-                float sm = 5 * density;
-                bg.setCornerRadii(new float[]{r, r, r, r, sm, sm, r, r});
             } else {
                 bg.setColor(Color.parseColor("#F5F8FC"));
                 bg.setStroke((int) Math.max(1, density), Color.parseColor("#D8E0EC"));
-                float r = 18 * density;
-                float sm = 5 * density;
-                bg.setCornerRadii(new float[]{r, r, r, r, r, r, sm, sm});
             }
-            bubble.setBackground(bg);
-            bubble.setElevation(3 * density);
+            bg.setCornerRadii(radii);
+
+            LayerDrawable layered = new LayerDrawable(new android.graphics.drawable.Drawable[]{shadow, bg});
+            int padS = (int) (1.5f * density);
+            int padB = (int) (3.5f * density);
+            layered.setLayerInset(1, padS, padS, padS, padB);
+            bubble.setBackground(layered);
+
+            int px = (int) (15 * density) + padS;
+            int py = (int) (10 * density) + padS;
+            bubble.setPadding(px, py, px, py + padB);
 
             row.addView(bubble);
             chatContainer.addView(row, rowLp);
@@ -492,19 +540,19 @@ public class MainActivity extends NativeActivity {
                 msgInput.setVisibility(View.VISIBLE);
             }
 
-            if (chatScroll != null && chatLp != null && targetY > 0) {
+            if (chatRoot != null && chatScroll != null && chatLp != null && targetY > 0) {
                 int chatTop = (int) (70 * density);
-                int chatH = Math.max((int) (40 * density), targetY - chatTop - (int) (10 * density));
+                int chatH = Math.max((int) (40 * density), targetY - chatTop - (int) (8 * density));
                 if (Math.abs(chatH - lastChatHeight) > 2) {
                     lastChatHeight = chatH;
                     chatLp.y = chatTop;
                     chatLp.height = chatH;
                     try {
-                        windowManager.updateViewLayout(chatScroll, chatLp);
+                        windowManager.updateViewLayout(chatRoot, chatLp);
                     } catch (Throwable ignored) {
                     }
-                    if (chatScroll.getVisibility() != View.VISIBLE) {
-                        chatScroll.setVisibility(View.VISIBLE);
+                    if (chatRoot.getVisibility() != View.VISIBLE) {
+                        chatRoot.setVisibility(View.VISIBLE);
                     }
                     chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
                 }
@@ -644,7 +692,7 @@ public class MainActivity extends NativeActivity {
         wsRunning = false;
         try { if (wsSocket != null) wsSocket.close(); } catch (Throwable ignored) {}
         if (overlaysAttached && windowManager != null) {
-            try { windowManager.removeViewImmediate(chatScroll); } catch (Throwable ignored) {}
+            try { windowManager.removeViewImmediate(chatRoot); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(fpsLabel); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(msgInput); } catch (Throwable ignored) {}
             overlaysAttached = false;
