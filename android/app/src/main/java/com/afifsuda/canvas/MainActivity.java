@@ -8,10 +8,12 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.InputType;
@@ -20,11 +22,10 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
-import android.widget.FrameLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -81,8 +82,12 @@ public class MainActivity extends NativeActivity {
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private WindowManager windowManager;
     private EditText msgInput;
     private TextView fpsLabel;
+    private WindowManager.LayoutParams fpsLp;
+    private WindowManager.LayoutParams inputLp;
+    private boolean overlaysAttached = false;
     private float density = 1.0f;
     private int lastLeft = -1, lastTop = -1, lastWidth = -1, lastHeight = -1;
 
@@ -95,9 +100,16 @@ public class MainActivity extends NativeActivity {
         });
         super.onCreate(savedInstanceState);
         density = getResources().getDisplayMetrics().density;
+        windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
 
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.TRANSPARENT);
+        fpsLabel = new TextView(this);
+        fpsLabel.setText("60fps");
+        fpsLabel.setTextColor(Color.parseColor("#141923"));
+        fpsLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        fpsLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        fpsLabel.setIncludeFontPadding(false);
+        fpsLabel.setGravity(Gravity.CENTER);
+        fpsLabel.setBackgroundColor(Color.TRANSPARENT);
 
         msgInput = new EditText(this);
         msgInput.setBackgroundColor(Color.TRANSPARENT);
@@ -112,7 +124,6 @@ public class MainActivity extends NativeActivity {
         );
         msgInput.setMaxLines(6);
         msgInput.setVerticalScrollBarEnabled(true);
-
         msgInput.setOnFocusChangeListener((v, hasFocus) -> nativeSetFocused(hasFocus));
         msgInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -122,30 +133,8 @@ public class MainActivity extends NativeActivity {
             }
         });
 
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(100, (int) (52 * density));
-        overlay.addView(msgInput, lp);
-
-        fpsLabel = new TextView(this);
-        fpsLabel.setText("60fps");
-        fpsLabel.setTextColor(Color.parseColor("#141923"));
-        fpsLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        fpsLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        fpsLabel.setIncludeFontPadding(false);
-        fpsLabel.setGravity(Gravity.CENTER);
-        FrameLayout.LayoutParams fpsLp = new FrameLayout.LayoutParams(
-            (int) (68 * density),
-            (int) (28 * density),
-            Gravity.TOP | Gravity.CENTER_HORIZONTAL
-        );
-        fpsLp.topMargin = (int) (30 * density);
-        overlay.addView(fpsLabel, fpsLp);
-
-        addContentView(overlay, new ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        ));
-
         final View root = getWindow().getDecorView();
+        root.post(this::attachOverlays);
         root.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
             @Override
             public void onGlobalLayout() {
@@ -156,6 +145,52 @@ public class MainActivity extends NativeActivity {
                 nativeSetKeyboardInset(keypad > screenH * 0.12 ? keypad : 0);
             }
         });
+    }
+
+    private void attachOverlays() {
+        if (overlaysAttached || isFinishing() || windowManager == null) return;
+        IBinder token = getWindow().getDecorView().getWindowToken();
+        if (token == null) {
+            getWindow().getDecorView().postDelayed(this::attachOverlays, 50);
+            return;
+        }
+
+        fpsLp = new WindowManager.LayoutParams(
+            (int) (68 * density),
+            (int) (28 * density),
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        );
+        fpsLp.token = token;
+        fpsLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        fpsLp.y = (int) (30 * density);
+
+        inputLp = new WindowManager.LayoutParams(
+            100,
+            (int) (52 * density),
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        );
+        inputLp.token = token;
+        inputLp.gravity = Gravity.TOP | Gravity.START;
+        inputLp.x = 0;
+        inputLp.y = 0;
+
+        try {
+            windowManager.addView(fpsLabel, fpsLp);
+            windowManager.addView(msgInput, inputLp);
+            overlaysAttached = true;
+        } catch (Throwable t) {
+            StringWriter sw = new StringWriter();
+            t.printStackTrace(new PrintWriter(sw));
+            showErrorAndCopy("Overlay attach error:\n" + sw.toString());
+        }
     }
 
     private void recalcHeight() {
@@ -170,26 +205,33 @@ public class MainActivity extends NativeActivity {
 
     public void syncInputLayout(final int leftPx, final int topPx, final int widthPx, final int heightPx, final float dropPx) {
         uiHandler.post(() -> {
-            if (msgInput == null) return;
-            if (leftPx != lastLeft || topPx != lastTop || widthPx != lastWidth || heightPx != lastHeight) {
+            if (!overlaysAttached || msgInput == null || inputLp == null || windowManager == null) return;
+            int targetY = topPx + Math.round(dropPx);
+            if (leftPx != lastLeft || targetY != lastTop || widthPx != lastWidth || heightPx != lastHeight) {
                 lastLeft = leftPx;
-                lastTop = topPx;
+                lastTop = targetY;
                 lastWidth = widthPx;
                 lastHeight = heightPx;
-                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) msgInput.getLayoutParams();
-                lp.leftMargin = leftPx;
-                lp.topMargin = topPx;
-                lp.width = Math.max(60, widthPx);
-                lp.height = Math.max(1, heightPx);
-                msgInput.setLayoutParams(lp);
+                inputLp.x = leftPx;
+                inputLp.y = targetY;
+                inputLp.width = Math.max(60, widthPx);
+                inputLp.height = Math.max(1, heightPx);
+                try {
+                    windowManager.updateViewLayout(msgInput, inputLp);
+                } catch (Throwable ignored) {
+                }
             }
-            msgInput.setTranslationY(dropPx);
         });
     }
 
     public void focusInput() {
         uiHandler.post(() -> {
-            if (msgInput == null) return;
+            if (!overlaysAttached || msgInput == null || inputLp == null || windowManager == null) return;
+            inputLp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+            try {
+                windowManager.updateViewLayout(msgInput, inputLp);
+            } catch (Throwable ignored) {
+            }
             msgInput.requestFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
             if (imm != null) imm.showSoftInput(msgInput, InputMethodManager.SHOW_IMPLICIT);
@@ -198,10 +240,15 @@ public class MainActivity extends NativeActivity {
 
     public void blurInput() {
         uiHandler.post(() -> {
-            if (msgInput == null) return;
+            if (!overlaysAttached || msgInput == null || inputLp == null || windowManager == null) return;
             msgInput.clearFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
             if (imm != null) imm.hideSoftInputFromWindow(msgInput.getWindowToken(), 0);
+            inputLp.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+            try {
+                windowManager.updateViewLayout(msgInput, inputLp);
+            } catch (Throwable ignored) {
+            }
         });
     }
 
@@ -296,6 +343,11 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
+        if (overlaysAttached && windowManager != null) {
+            try { windowManager.removeViewImmediate(fpsLabel); } catch (Throwable ignored) {}
+            try { windowManager.removeViewImmediate(msgInput); } catch (Throwable ignored) {}
+            overlaysAttached = false;
+        }
         executor.shutdownNow();
         super.onDestroy();
     }
