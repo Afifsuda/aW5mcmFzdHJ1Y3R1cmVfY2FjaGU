@@ -1000,6 +1000,7 @@ fn android_main(app: AndroidApp) {
                                     plus_pulse_val = 1.0;
                                     if let Some(ref vm) = vm {
                                         call_java_void(vm, activity_ptr, "vibrateHaptic", "()V", &[]);
+                                        call_java_void(vm, activity_ptr, "showUsageDialog", "()V", &[]);
                                     }
                                 }
                             } else if btn_pressed {

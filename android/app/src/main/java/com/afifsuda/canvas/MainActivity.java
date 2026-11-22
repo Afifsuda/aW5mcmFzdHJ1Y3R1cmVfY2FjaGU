@@ -5,6 +5,7 @@ import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -34,10 +35,14 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
@@ -47,6 +52,9 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -118,9 +126,13 @@ public class MainActivity extends NativeActivity {
     private int lastChatHeight = -1;
 
     private volatile boolean wsRunning = true;
+    private volatile boolean wsConnected = false;
     private volatile SSLSocket wsSocket;
     private volatile OutputStream wsOut;
     private Thread wsThread;
+
+    private final Object historyLock = new Object();
+    private JSONArray chatHistory = new JSONArray();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -262,6 +274,7 @@ public class MainActivity extends NativeActivity {
             windowManager.addView(fpsLabel, fpsLp);
             windowManager.addView(msgInput, inputLp);
             overlaysAttached = true;
+            loadChatHistory();
         } catch (Throwable t) {
             StringWriter sw = new StringWriter();
             t.printStackTrace(new PrintWriter(sw));
@@ -350,6 +363,8 @@ public class MainActivity extends NativeActivity {
 
                     wsSocket = socket;
                     wsOut = out;
+                    wsConnected = true;
+                    recordUsage(1, 0, 0);
 
                     while (wsRunning) {
                         int b0 = in.readUnsignedByte();
@@ -385,6 +400,8 @@ public class MainActivity extends NativeActivity {
                                 if ("chat".equals(obj.optString("type"))) {
                                     String txt = obj.optString("text", "").trim();
                                     if (!txt.isEmpty()) {
+                                        recordUsage(0, 0, 1);
+                                        saveChatMessage(txt, false);
                                         addChatBubble(txt, false);
                                     }
                                 }
@@ -394,6 +411,7 @@ public class MainActivity extends NativeActivity {
                     }
                 } catch (Throwable ignored) {
                 } finally {
+                    wsConnected = false;
                     wsOut = null;
                     try {
                         if (wsSocket != null) wsSocket.close();
@@ -547,6 +565,8 @@ public class MainActivity extends NativeActivity {
             if (!text.isEmpty()) {
                 msgInput.setText("");
                 nativeSetTargetCapHeight(52f);
+                recordUsage(0, 1, 0);
+                saveChatMessage(text, true);
                 addChatBubble(text, true);
                 try {
                     JSONObject obj = new JSONObject();
@@ -555,6 +575,130 @@ public class MainActivity extends NativeActivity {
                     sendWsFrame(0x1, obj.toString().getBytes(StandardCharsets.UTF_8));
                 } catch (Throwable ignored) {
                 }
+            }
+        });
+    }
+
+    private SharedPreferences getUsagePrefs() {
+        SharedPreferences prefs = getSharedPreferences("cf_usage", Context.MODE_PRIVATE);
+        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+        if (!today.equals(prefs.getString("date", ""))) {
+            prefs.edit()
+                .putString("date", today)
+                .putInt("connects", 0)
+                .putInt("sent", 0)
+                .putInt("recv", 0)
+                .apply();
+        }
+        return prefs;
+    }
+
+    private synchronized void recordUsage(int connects, int sent, int recv) {
+        try {
+            SharedPreferences prefs = getUsagePrefs();
+            prefs.edit()
+                .putInt("connects", prefs.getInt("connects", 0) + connects)
+                .putInt("sent", prefs.getInt("sent", 0) + sent)
+                .putInt("recv", prefs.getInt("recv", 0) + recv)
+                .apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void loadChatHistory() {
+        executor.execute(() -> {
+            try {
+                File f = new File(getFilesDir(), "chat_history.json");
+                if (!f.exists()) return;
+                byte[] data = new byte[(int) f.length()];
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    int read = 0;
+                    while (read < data.length) {
+                        int n = fis.read(data, read, data.length - read);
+                        if (n <= 0) break;
+                        read += n;
+                    }
+                }
+                JSONArray arr = new JSONArray(new String(data, StandardCharsets.UTF_8));
+                synchronized (historyLock) {
+                    chatHistory = arr;
+                }
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject item = arr.optJSONObject(i);
+                    if (item != null) {
+                        String txt = item.optString("text", "");
+                        boolean self = item.optBoolean("self", false);
+                        if (!txt.isEmpty()) addChatBubble(txt, self);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    private void saveChatMessage(final String text, final boolean isSelf) {
+        executor.execute(() -> {
+            synchronized (historyLock) {
+                try {
+                    JSONObject item = new JSONObject();
+                    item.put("text", text);
+                    item.put("self", isSelf);
+                    item.put("ts", System.currentTimeMillis());
+                    chatHistory.put(item);
+                    while (chatHistory.length() > 500) {
+                        chatHistory.remove(0);
+                    }
+                    File f = new File(getFilesDir(), "chat_history.json");
+                    try (FileOutputStream fos = new FileOutputStream(f)) {
+                        fos.write(chatHistory.toString().getBytes(StandardCharsets.UTF_8));
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
+    public void showUsageDialog() {
+        uiHandler.post(() -> {
+            try {
+                SharedPreferences prefs = getUsagePrefs();
+                int connects = prefs.getInt("connects", 0);
+                int sent = prefs.getInt("sent", 0);
+                int recv = prefs.getInt("recv", 0);
+                int totalMsgs = sent + recv;
+                int estBillableReq = connects + (totalMsgs + 19) / 20;
+                double pct = (estBillableReq / 100000.0) * 100.0;
+                int savedCount;
+                synchronized (historyLock) {
+                    savedCount = chatHistory.length();
+                }
+
+                String status = wsConnected ? "Terhubung (Cloudflare)" : "Menyambung ulang...";
+                String info = "Status: " + status
+                    + "\nRoom: 1234\n\n"
+                    + "Pemakaian Hari Ini:\n"
+                    + "• Handshake Koneksi: " + connects + "\n"
+                    + "• Pesan Terkirim: " + sent + "\n"
+                    + "• Pesan Diterima: " + recv + "\n"
+                    + "• Est. Request Cloudflare: ~" + estBillableReq + " / 100.000 ("
+                    + String.format(Locale.US, "%.4f%%", pct) + ")\n\n"
+                    + "Riwayat Chat Tersimpan: " + savedCount + " pesan";
+
+                new AlertDialog.Builder(this)
+                    .setTitle("Cloudflare Usage & Chat")
+                    .setMessage(info)
+                    .setPositiveButton("Tutup", null)
+                    .setNeutralButton("Hapus Chat", (d, w) -> {
+                        synchronized (historyLock) {
+                            chatHistory = new JSONArray();
+                            File f = new File(getFilesDir(), "chat_history.json");
+                            if (f.exists()) f.delete();
+                        }
+                        if (chatContainer != null) chatContainer.removeAllViews();
+                        Toast.makeText(this, "Riwayat chat dihapus", Toast.LENGTH_SHORT).show();
+                    })
+                    .show();
+            } catch (Throwable ignored) {
             }
         });
     }
