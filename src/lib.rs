@@ -30,6 +30,8 @@ static MODAL_CX_PX: AtomicU32 = AtomicU32::new(0);
 static MODAL_CY_PX: AtomicU32 = AtomicU32::new(0);
 static MODAL_HW_PX: AtomicU32 = AtomicU32::new(0);
 static MODAL_HH_PX: AtomicU32 = AtomicU32::new(0);
+static VIDEO_PRESSED: AtomicBool = AtomicBool::new(false);
+static CALL_PRESSED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeOnWallpaperLoaded(
@@ -108,6 +110,17 @@ pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetModalBound
     MODAL_CY_PX.store(cy.to_bits(), Ordering::Relaxed);
     MODAL_HW_PX.store(hw.to_bits(), Ordering::Relaxed);
     MODAL_HH_PX.store(hh.to_bits(), Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetHeaderPress(
+    _env: JNIEnv,
+    _class: JClass,
+    video_pressed: jboolean,
+    call_pressed: jboolean,
+) {
+    VIDEO_PRESSED.store(video_pressed != 0, Ordering::Relaxed);
+    CALL_PRESSED.store(call_pressed != 0, Ordering::Relaxed);
 }
 
 // --- Minimal EGL & GLESv3 FFI ---
@@ -235,7 +248,7 @@ void main() {
 }
 \0";
 
-// Ported 3D Sculpted Matte Ceramic Shader (OpenGL ES 3.0) + SDF FPS Digits
+// Ported 3D Sculpted Matte Ceramic Shader (OpenGL ES 3.0)
 const FRAG_SRC: &str = "#version 300 es
 precision highp float;
 
@@ -260,7 +273,15 @@ uniform float btnPress;
 uniform float isFocused;
 uniform float sendPulse;
 uniform vec2 tilt;
-uniform float fpsBoxHalfW;
+uniform vec2 headerCenter;
+uniform vec2 headerHalf;
+uniform vec2 actionCenter;
+uniform vec2 actionHalf;
+uniform vec2 videoCenter;
+uniform vec2 callCenter;
+uniform float headerBtnR;
+uniform float videoPress;
+uniform float callPress;
 uniform vec3 uEnvColor;
 uniform float modalOpen;
 uniform vec2 modalCenter;
@@ -334,17 +355,21 @@ vec3 render3DMatteSurface(
     int tier
 ) {
     float lift = 1.0 - press * 0.60;
+    bool isCircleBtn = (!isCapsule && tier == 1);
+    float shadowStr = 1.20;
 
-    float sigma = (tier == 1) ? (8.5 * dpr * lift) : (18.0 * dpr * lift);
+    float sigma = isCircleBtn ? (4.0 * dpr * lift) : ((tier == 1) ? (7.5 * dpr * lift) : (14.0 * dpr * lift));
     float distPos = max(dPenumbra, 0.0);
     float gaussPenumbra = exp(-(distPos * distPos) / (2.0 * sigma * sigma));
-    float penumbraStrength = (tier == 1) ? (0.14 * lift) : (0.24 * lift);
+    float basePen = isCircleBtn ? 0.22 : ((tier == 1) ? 0.16 : 0.22);
+    float penumbraStrength = basePen * lift * shadowStr;
 
-    float creviceWidth = (tier == 1) ? (2.8 * dpr) : (4.0 * dpr);
+    float creviceWidth = isCircleBtn ? (2.8 * dpr) : ((tier == 1) ? (2.8 * dpr) : (3.8 * dpr));
     float creviceAO = smoothstep(creviceWidth, -0.5 * dpr, dCrevice);
-    creviceAO = creviceAO * creviceAO * ((tier == 1) ? (0.18 - press * 0.04) : (0.22 - press * 0.06));
+    float baseCrev = isCircleBtn ? (0.34 - press * 0.08) : ((tier == 1) ? (0.18 - press * 0.04) : (0.22 - press * 0.06));
+    creviceAO = creviceAO * creviceAO * baseCrev * shadowStr;
 
-    vec3 shadowFilter = mix(vec3(1.0), vec3(0.42, 0.47, 0.58), clamp(gaussPenumbra * penumbraStrength + creviceAO, 0.0, 0.48));
+    vec3 shadowFilter = mix(vec3(1.0), vec3(0.36, 0.42, 0.54), clamp(gaussPenumbra * penumbraStrength + creviceAO, 0.0, 0.58));
     bgCol *= shadowFilter;
 
     float mask = smoothstep(1.15, -0.65, d);
@@ -366,15 +391,15 @@ vec3 render3DMatteSurface(
     }
 
     float depthNorm = clamp(-d / max(maxThick, 1.0), 0.0, 1.0);
-    float bevelCurve = pow(1.0 - depthNorm, 2.4);
-    float domeSlope = bevelCurve * (0.72 - press * 0.16);
+    float bevelCurve = pow(1.0 - depthNorm, 1.35);
+    float domeSlope = clamp(bevelCurve * (0.78 - press * 0.16) * 1.45, 0.0, 0.95);
 
-    vec3 N = normalize(vec3(grad2D * domeSlope, sqrt(max(0.08, 1.0 - domeSlope * domeSlope))));
+    vec3 N = normalize(vec3(grad2D * domeSlope, sqrt(max(0.06, 1.0 - domeSlope * domeSlope))));
 
     vec3 L = normalize(vec3(-0.24 + tilt.x * 0.55, -0.82 + tilt.y * 0.45, 0.52));
     float wrappedDiffuse = clamp((dot(N, L) + 0.45) / 1.45, 0.0, 1.0);
     float skyFactor = 0.5 + 0.5 * (-N.y);
-    float lightTerm = mix(0.84, 1.0, wrappedDiffuse * 0.72 + skyFactor * 0.28);
+    float lightTerm = clamp(mix(0.76, 1.0, wrappedDiffuse * 0.72 + skyFactor * 0.28), 0.0, 1.0);
 
     vec3 surface;
     if (isAccent) {
@@ -384,7 +409,8 @@ vec3 render3DMatteSurface(
         surface += envBounce * 0.04;
     } else {
         vec3 baseTop = (tier == 1) ? vec3(0.995, 0.997, 1.0) : vec3(0.975, 0.980, 0.990);
-        vec3 baseBot = (tier == 1) ? vec3(0.905, 0.922, 0.952) : vec3(0.880, 0.900, 0.935);
+        vec3 baseBot = (tier == 1) ? vec3(0.865, 0.888, 0.930) : vec3(0.840, 0.868, 0.915);
+        baseBot = mix(baseTop, baseBot, 1.25);
         if (activeGlow > 0.01) {
             baseTop = mix(baseTop, vec3(1.0), activeGlow * 0.5);
             baseBot = mix(baseBot, vec3(0.915, 0.932, 0.965), activeGlow * 0.45);
@@ -394,17 +420,19 @@ vec3 render3DMatteSurface(
         surface = mix(surface, envBounce, bounceMask);
     }
 
-    float edgeZone = smoothstep(-4.0 * dpr, -0.35 * dpr, d);
+    surface *= 1.12;
+
+    float edgeZone = smoothstep(-4.5 * dpr * 1.5, -0.35 * dpr, d);
     float topRim = clamp(dot(grad2D, normalize(vec2(-0.22, -0.97))), 0.0, 1.0);
     float botRim = pow(clamp(dot(grad2D, vec2(0.0, 1.0)), 0.0, 1.0), 1.35);
 
     if (isAccent) {
-        surface = mix(surface, vec3(0.42, 0.71, 1.0), edgeZone * topRim * (0.55 - press * 0.20));
-        surface = mix(surface, vec3(0.05, 0.24, 0.64), edgeZone * botRim * 0.42);
+        surface = mix(surface, vec3(0.42, 0.71, 1.0), clamp(edgeZone * topRim * (0.55 - press * 0.20) * 1.35, 0.0, 1.0));
+        surface = mix(surface, vec3(0.05, 0.24, 0.64), clamp(edgeZone * botRim * 0.42 * 1.4, 0.0, 1.0));
     } else {
-        surface = mix(surface, vec3(1.0), edgeZone * topRim * (0.78 - press * 0.28));
-        vec3 rimShade = (tier == 1) ? vec3(0.82, 0.85, 0.905) : vec3(0.79, 0.825, 0.885);
-        surface = mix(surface, rimShade, edgeZone * botRim * 0.48);
+        surface = mix(surface, vec3(1.0), clamp(edgeZone * topRim * (0.78 - press * 0.28) * 1.4 * 1.3, 0.0, 1.0));
+        vec3 rimShade = (tier == 1) ? vec3(0.78, 0.82, 0.885) : vec3(0.75, 0.795, 0.865);
+        surface = mix(surface, rimShade, clamp(edgeZone * botRim * 0.52 * 1.45, 0.0, 1.0));
     }
 
     if (press > 0.001) {
@@ -421,15 +449,44 @@ void main() {
 
     vec3 envBounce = mix(vec3(0.93, 0.945, 0.965), uEnvColor, imgFade);
 
-    // --- FPS 3D MATTE PILL DI TENGAH ATAS ---
-    float fpsCenterY = 44.0 * dpr;
-    if (px.y < 84.0 * dpr && abs(px.x - res.x * 0.5) < (fpsBoxHalfW + 30.0 * dpr)) {
-        vec2 pFps = px - vec2(res.x * 0.5, fpsCenterY);
-        float dPill = sdRoundBox(pFps, vec2(fpsBoxHalfW, 14.0 * dpr), 14.0 * dpr);
-        float dPillPenumbra = sdRoundBox(pFps - vec2(0.0, 4.5 * dpr), vec2(fpsBoxHalfW, 14.0 * dpr), 14.0 * dpr);
-        float dPillCrevice = sdRoundBox(pFps - vec2(0.0, 1.4 * dpr), vec2(fpsBoxHalfW, 14.0 * dpr), 14.0 * dpr);
+    // --- HEADER 3D MATTE CERAMIC BAR + SEPARATE ACTIONS CAPSULE & 2 CIRCLE BUTTONS ---
+    if (px.y < headerCenter.y + headerHalf.y + 34.0 * dpr) {
+        vec2 pHead = px - headerCenter;
+        if (abs(pHead.x) < headerHalf.x + 36.0 * dpr) {
+            float dHead = sdRoundBox(pHead, headerHalf, headerHalf.y);
+            float dHeadPen = sdRoundBox(pHead - vec2(0.0, 5.5 * dpr), headerHalf, headerHalf.y);
+            float dHeadCrev = sdRoundBox(pHead - vec2(0.0, 1.5 * dpr), headerHalf, headerHalf.y);
+            col = render3DMatteSurface(col, envBounce, pHead, dHead, dHeadPen, dHeadCrev, 0.0, 0.0, true, false, 1);
+        }
 
-        col = render3DMatteSurface(col, envBounce, pFps, dPill, dPillPenumbra, dPillCrevice, 0.0, 0.0, true, false, 1);
+        vec2 pAct = px - actionCenter;
+        if (abs(pAct.x) < actionHalf.x + 36.0 * dpr) {
+            float dAct = sdRoundBox(pAct, actionHalf, actionHalf.y);
+            float dActPen = sdRoundBox(pAct - vec2(0.0, 5.5 * dpr), actionHalf, actionHalf.y);
+            float dActCrev = sdRoundBox(pAct - vec2(0.0, 1.5 * dpr), actionHalf, actionHalf.y);
+            col = render3DMatteSurface(col, envBounce, pAct, dAct, dActPen, dActCrev, 0.0, 0.0, true, false, 1);
+        }
+
+        vec2 pVid = px - videoCenter;
+        if (abs(pVid.x) < headerBtnR + 28.0 * dpr && abs(pVid.y) < headerBtnR + 28.0 * dpr) {
+            vec2 pVidPhys = pVid - vec2(0.0, videoPress * 1.5 * dpr);
+            float rVid = headerBtnR * (1.0 - videoPress * 0.045);
+            float dVid = length(pVidPhys) - rVid;
+            float dVidPen = length(pVid - vec2(0.0, 3.2 * dpr) * (1.0 - videoPress * 0.6)) - rVid;
+            float dVidCrev = length(pVid - vec2(0.0, 1.0 * dpr) * (1.0 - videoPress * 0.6)) - rVid;
+            col = render3DMatteSurface(col, envBounce, pVidPhys, dVid, dVidPen, dVidCrev, videoPress, 0.0, false, false, 1);
+        }
+
+        vec2 pCal = px - callCenter;
+        if (abs(pCal.x) < headerBtnR + 28.0 * dpr && abs(pCal.y) < headerBtnR + 28.0 * dpr) {
+            vec2 pCalPhys = pCal - vec2(0.0, callPress * 1.5 * dpr);
+            float rCal = headerBtnR * (1.0 - callPress * 0.045);
+            float dCal = length(pCalPhys) - rCal;
+            float dCalPen = length(pCal - vec2(0.0, 3.2 * dpr) * (1.0 - callPress * 0.6)) - rCal;
+            float dCalCrev = length(pCal - vec2(0.0, 1.0 * dpr) * (1.0 - callPress * 0.6)) - rCal;
+            col = render3DMatteSurface(col, envBounce, pCalPhys, dCal, dCalPen, dCalCrev, callPress, 0.0, false, false, 1);
+        }
+
         fragColor = vec4(col, 1.0);
         return;
     }
@@ -586,7 +643,15 @@ struct Uniforms {
     is_focused: i32,
     send_pulse: i32,
     tilt: i32,
-    fps_box_half_w: i32,
+    header_center: i32,
+    header_half: i32,
+    action_center: i32,
+    action_half: i32,
+    video_center: i32,
+    call_center: i32,
+    header_btn_r: i32,
+    video_press: i32,
+    call_press: i32,
     u_env_color: i32,
     modal_open: i32,
     modal_center: i32,
@@ -741,7 +806,15 @@ impl GlState {
                 is_focused: loc("isFocused"),
                 send_pulse: loc("sendPulse"),
                 tilt: loc("tilt"),
-                fps_box_half_w: loc("fpsBoxHalfW"),
+                header_center: loc("headerCenter"),
+                header_half: loc("headerHalf"),
+                action_center: loc("actionCenter"),
+                action_half: loc("actionHalf"),
+                video_center: loc("videoCenter"),
+                call_center: loc("callCenter"),
+                header_btn_r: loc("headerBtnR"),
+                video_press: loc("videoPress"),
+                call_press: loc("callPress"),
                 u_env_color: loc("uEnvColor"),
                 modal_open: loc("modalOpen"),
                 modal_center: loc("modalCenter"),
@@ -819,6 +892,8 @@ impl GlState {
         btn_press: f32,
         focused: f32,
         send_pulse: f32,
+        video_press: f32,
+        call_press: f32,
         modal_open: f32,
         modal_bounds: [f32; 4],
     ) {
@@ -853,7 +928,26 @@ impl GlState {
         glUniform1f(self.u.is_focused, focused);
         glUniform1f(self.u.send_pulse, send_pulse);
         glUniform2f(self.u.tilt, 0.0, 0.0);
-        glUniform1f(self.u.fps_box_half_w, 34.0 * dpr);
+        let sw_dp = self.width as f32 / dpr;
+        let total_header_w = (sw_dp - 28.0).min(540.0);
+        let start_header_x = (sw_dp - total_header_w) * 0.5;
+        let action_w = 108.0;
+        let gap_w = 10.0;
+        let profile_w = total_header_w - action_w - gap_w;
+        let profile_cx = start_header_x + profile_w * 0.5;
+        let action_cx = start_header_x + total_header_w - action_w * 0.5;
+        let video_cx = start_header_x + total_header_w - 6.0 - 22.0 - 8.0 - 44.0;
+        let call_cx = start_header_x + total_header_w - 6.0 - 22.0;
+
+        glUniform2f(self.u.header_center, profile_cx * dpr, 40.0 * dpr);
+        glUniform2f(self.u.header_half, (profile_w * 0.5) * dpr, 28.0 * dpr);
+        glUniform2f(self.u.action_center, action_cx * dpr, 40.0 * dpr);
+        glUniform2f(self.u.action_half, (action_w * 0.5) * dpr, 28.0 * dpr);
+        glUniform2f(self.u.video_center, video_cx * dpr, 40.0 * dpr);
+        glUniform2f(self.u.call_center, call_cx * dpr, 40.0 * dpr);
+        glUniform1f(self.u.header_btn_r, 22.0 * dpr);
+        glUniform1f(self.u.video_press, video_press);
+        glUniform1f(self.u.call_press, call_press);
         glUniform3f(self.u.u_env_color, self.env_rgb[0], self.env_rgb[1], self.env_rgb[2]);
         glUniform1f(self.u.modal_open, modal_open);
         glUniform2f(self.u.modal_center, modal_bounds[0], modal_bounds[1]);
@@ -994,14 +1088,13 @@ fn android_main(app: AndroidApp) {
     let mut plus_pulse_val: f32 = 0.0;
     let mut focus_val: f32 = 0.0;
     let mut send_pulse_val: f32 = 0.0;
+    let mut video_press_val: f32 = 0.0;
+    let mut call_press_val: f32 = 0.0;
     let mut modal_open_val: f32 = 0.0;
     let mut img_fade: f32 = 0.0;
     let mut current_wall_idx: i32 = 0;
 
     let mut last_tick = Instant::now();
-    let mut fps_timer = Instant::now();
-    let mut frame_count: u32 = 0;
-    let mut current_fps: i32 = 60;
     let mut needs_redraw = true;
     let mut last_sync: (i32, i32, i32, i32, i32) = (-1, -1, -1, -1, -1);
 
@@ -1011,10 +1104,14 @@ fn android_main(app: AndroidApp) {
             || plus_pressed
             || cap_pressed
             || JAVA_CAP_PRESSED.load(Ordering::Relaxed)
+            || VIDEO_PRESSED.load(Ordering::Relaxed)
+            || CALL_PRESSED.load(Ordering::Relaxed)
             || btn_pressed
             || plus_press_val > 0.005
             || cap_press_val > 0.005
             || btn_press_val > 0.005
+            || video_press_val > 0.005
+            || call_press_val > 0.005
             || plus_pulse_val > 0.005
             || send_pulse_val > 0.005
             || (modal_open_val - if MODAL_OPEN.load(Ordering::Relaxed) { 1.0 } else { 0.0 }).abs() > 0.005
@@ -1187,6 +1284,10 @@ fn android_main(app: AndroidApp) {
         plus_press_val += ((if plus_pressed { 1.0 } else { 0.0 }) - plus_press_val) * (dt * 18.0).min(1.0);
         cap_press_val += ((if any_cap_pressed { 1.0 } else { 0.0 }) - cap_press_val) * (dt * 18.0).min(1.0);
         btn_press_val += ((if btn_pressed { 1.0 } else { 0.0 }) - btn_press_val) * (dt * 18.0).min(1.0);
+        let vid_target = if VIDEO_PRESSED.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+        let cal_target = if CALL_PRESSED.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+        video_press_val += (vid_target - video_press_val) * (dt * 18.0).min(1.0);
+        call_press_val += (cal_target - call_press_val) * (dt * 18.0).min(1.0);
         focus_val += (focused - focus_val) * (dt * 12.0).min(1.0);
         let target_modal = if MODAL_OPEN.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
         modal_open_val += (target_modal - modal_open_val) * (dt * 28.0).min(1.0);
@@ -1230,6 +1331,8 @@ fn android_main(app: AndroidApp) {
             || (cap_press_val - if any_cap_pressed { 1.0 } else { 0.0 }).abs() > 0.003
             || (btn_press_val - if btn_pressed { 1.0 } else { 0.0 }).abs() > 0.003
             || (focus_val - focused).abs() > 0.003
+            || (video_press_val - vid_target).abs() > 0.003
+            || (call_press_val - cal_target).abs() > 0.003
             || (modal_open_val - target_modal).abs() > 0.003
             || plus_pulse_val > 0.003
             || send_pulse_val > 0.003;
@@ -1254,31 +1357,14 @@ fn android_main(app: AndroidApp) {
                         btn_press_val,
                         focus_val,
                         send_pulse_val,
+                        video_press_val,
+                        call_press_val,
                         modal_open_val,
                         modal_bounds,
                     );
                 }
             }
             needs_redraw = false;
-            frame_count += 1;
-            let fps_elapsed = now.duration_since(fps_timer).as_secs_f32();
-            if fps_elapsed >= 0.35 {
-                let new_fps = (frame_count as f32 / fps_elapsed).round().max(1.0) as i32;
-                if new_fps != current_fps {
-                    current_fps = new_fps;
-                    if let Some(ref vm) = vm {
-                        call_java_void(
-                            vm,
-                            activity_ptr,
-                            "updateFpsLabel",
-                            "(I)V",
-                            &[JValue::Int(current_fps)],
-                        );
-                    }
-                }
-                frame_count = 0;
-                fps_timer = now;
-            }
         }
     }
 

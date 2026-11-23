@@ -8,10 +8,14 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,6 +37,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -90,6 +95,7 @@ public class MainActivity extends NativeActivity {
     private static native void nativeSetCapPressed(boolean pressed);
     private static native void nativeSetModalOpen(boolean open);
     private static native void nativeSetModalBounds(float cx, float cy, float hw, float hh);
+    private static native void nativeSetHeaderPress(boolean videoPressed, boolean callPressed);
 
     private static final String RELAY_HOST = "aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev";
     private static final String RELAY_PATH = "/?room=1234";
@@ -138,12 +144,19 @@ public class MainActivity extends NativeActivity {
 
     private WindowManager windowManager;
     private EditText msgInput;
-    private TextView fpsLabel;
+    private LinearLayout headerProfileView;
+    private View headerDotView;
+    private TextView headerStatusView;
+    private LinearLayout headerActionsView;
     private ScrollView chatScroll;
     private LinearLayout chatContainer;
-    private WindowManager.LayoutParams fpsLp;
+    private WindowManager.LayoutParams headerProfileLp;
+    private WindowManager.LayoutParams headerActionsLp;
     private WindowManager.LayoutParams inputLp;
     private WindowManager.LayoutParams chatLp;
+    private boolean isOnline = true;
+    private boolean videoPressed = false;
+    private boolean callPressed = false;
     private FrameLayout modalRoot;
     private LinearLayout modalCard;
     private WindowManager.LayoutParams modalLp;
@@ -193,19 +206,14 @@ public class MainActivity extends NativeActivity {
         netMode = prefs.getString("net_mode", MODE_HOST);
         hostIp = prefs.getString("host_ip", "192.168.1.2");
 
-        fpsLabel = new TextView(this);
-        fpsLabel.setText("60fps");
-        fpsLabel.setTextColor(Color.parseColor("#141923"));
-        fpsLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        fpsLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        fpsLabel.setIncludeFontPadding(false);
-        fpsLabel.setGravity(Gravity.CENTER);
-        fpsLabel.setBackgroundColor(Color.TRANSPARENT);
+        buildHeaderViews();
 
         chatScroll = new ScrollView(this);
         chatScroll.setVisibility(View.INVISIBLE);
         chatScroll.setBackgroundColor(Color.TRANSPARENT);
         chatScroll.setVerticalScrollBarEnabled(false);
+        chatScroll.setVerticalFadingEdgeEnabled(true);
+        chatScroll.setFadingEdgeLength((int) (22 * density));
         chatScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
 
         chatContainer = new LinearLayout(this);
@@ -277,18 +285,42 @@ public class MainActivity extends NativeActivity {
             return;
         }
 
-        fpsLp = new WindowManager.LayoutParams(
-            (int) (68 * density),
-            (int) (28 * density),
+        int screenW = getResources().getDisplayMetrics().widthPixels;
+        int totalHeaderW = Math.round(Math.min(screenW - 28 * density, 540 * density));
+        int startHeaderX = (screenW - totalHeaderW) / 2;
+        int actionW = Math.round(108 * density);
+        int gapW = Math.round(10 * density);
+        int profileW = Math.max(100, totalHeaderW - actionW - gapW);
+        int headerH = Math.round(56 * density);
+        int headerY = Math.round(12 * density);
+
+        headerProfileLp = new WindowManager.LayoutParams(
+            profileW,
+            headerH,
             WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         );
-        fpsLp.token = token;
-        fpsLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-        fpsLp.y = (int) (30 * density);
+        headerProfileLp.token = token;
+        headerProfileLp.gravity = Gravity.TOP | Gravity.START;
+        headerProfileLp.x = startHeaderX;
+        headerProfileLp.y = headerY;
+
+        headerActionsLp = new WindowManager.LayoutParams(
+            actionW,
+            headerH,
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        );
+        headerActionsLp.token = token;
+        headerActionsLp.gravity = Gravity.TOP | Gravity.START;
+        headerActionsLp.x = startHeaderX + totalHeaderW - actionW;
+        headerActionsLp.y = headerY;
 
         chatLp = new WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -320,7 +352,8 @@ public class MainActivity extends NativeActivity {
 
         try {
             windowManager.addView(chatScroll, chatLp);
-            windowManager.addView(fpsLabel, fpsLp);
+            windowManager.addView(headerProfileView, headerProfileLp);
+            windowManager.addView(headerActionsView, headerActionsLp);
             windowManager.addView(msgInput, inputLp);
 
             modalRoot = new FrameLayout(this);
@@ -361,7 +394,218 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    private Drawable createHeaderIconDrawable(final int kind) {
+        return new Drawable() {
+            private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+            @Override
+            public void draw(Canvas canvas) {
+                Rect b = getBounds();
+                float w = b.width();
+                float h = b.height();
+                float sx = w / 24f;
+                float sy = h / 24f;
+                canvas.save();
+                canvas.translate(b.left, b.top);
+                canvas.scale(sx, sy);
+                paint.setStyle(Paint.Style.FILL);
+                if (kind == 0) {
+                    paint.setColor(Color.WHITE);
+                    canvas.drawCircle(12f, 7.2f, 4.8f, paint);
+                    Path p = new Path();
+                    p.moveTo(2.4f, 21.6f);
+                    p.lineTo(2.4f, 19.2f);
+                    p.cubicTo(2.4f, 16.0f, 8.8f, 14.4f, 12f, 14.4f);
+                    p.cubicTo(15.2f, 14.4f, 21.6f, 16.0f, 21.6f, 19.2f);
+                    p.lineTo(21.6f, 21.6f);
+                    p.close();
+                    canvas.drawPath(p, paint);
+                } else if (kind == 1) {
+                    paint.setColor(Color.parseColor("#111622"));
+                    android.graphics.RectF body = new android.graphics.RectF(3f, 6f, 17f, 18f);
+                    canvas.drawRoundRect(body, 1.5f, 1.5f, paint);
+                    Path lens = new Path();
+                    lens.moveTo(17f, 10.5f);
+                    lens.lineTo(21f, 7f);
+                    lens.lineTo(21f, 17f);
+                    lens.lineTo(17f, 13.5f);
+                    lens.close();
+                    canvas.drawPath(lens, paint);
+                } else {
+                    paint.setColor(Color.parseColor("#111622"));
+                    Path phone = new Path();
+                    phone.moveTo(6.62f, 10.79f);
+                    phone.cubicTo(8.06f, 13.62f, 10.38f, 15.94f, 13.21f, 17.38f);
+                    phone.lineTo(15.41f, 15.18f);
+                    phone.cubicTo(15.68f, 14.91f, 16.08f, 14.82f, 16.43f, 14.94f);
+                    phone.cubicTo(17.55f, 15.31f, 18.76f, 15.51f, 20f, 15.51f);
+                    phone.cubicTo(20.55f, 15.51f, 21f, 15.96f, 21f, 16.51f);
+                    phone.lineTo(21f, 20f);
+                    phone.cubicTo(21f, 20.55f, 20.55f, 21f, 20f, 21f);
+                    phone.cubicTo(10.61f, 21f, 3f, 13.39f, 3f, 4f);
+                    phone.cubicTo(3f, 3.45f, 3.45f, 3f, 4f, 3f);
+                    phone.lineTo(7.5f, 3f);
+                    phone.cubicTo(8.05f, 3f, 8.5f, 3.45f, 8.5f, 4f);
+                    phone.cubicTo(8.5f, 5.25f, 8.7f, 6.46f, 9.07f, 7.58f);
+                    phone.cubicTo(9.18f, 7.93f, 9.1f, 8.32f, 8.82f, 8.59f);
+                    phone.close();
+                    canvas.drawPath(phone, paint);
+                }
+                canvas.restore();
+            }
+
+            @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+            @Override public void setColorFilter(android.graphics.ColorFilter cf) { paint.setColorFilter(cf); }
+            @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+        };
+    }
+
+    private void buildHeaderViews() {
+        headerProfileView = new LinearLayout(this);
+        headerProfileView.setOrientation(LinearLayout.HORIZONTAL);
+        headerProfileView.setGravity(Gravity.CENTER_VERTICAL);
+        headerProfileView.setPadding((int) (12 * density), 0, (int) (12 * density), 0);
+        headerProfileView.setBackgroundColor(Color.TRANSPARENT);
+
+        FrameLayout avatarWrap = new FrameLayout(this);
+        int avSize = (int) (36 * density);
+        LinearLayout.LayoutParams avLp = new LinearLayout.LayoutParams(avSize, avSize);
+        avLp.rightMargin = (int) (11 * density);
+
+        View avatarBg = new View(this);
+        GradientDrawable avBgDraw = new GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            new int[]{Color.parseColor("#3B82F6"), Color.parseColor("#1D4ED8")}
+        );
+        avBgDraw.setShape(GradientDrawable.OVAL);
+        avatarBg.setBackground(avBgDraw);
+        avatarWrap.addView(avatarBg, new FrameLayout.LayoutParams(avSize, avSize));
+
+        ImageView avatarIcon = new ImageView(this);
+        avatarIcon.setImageDrawable(createHeaderIconDrawable(0));
+        int icSize = (int) (20 * density);
+        FrameLayout.LayoutParams icLp = new FrameLayout.LayoutParams(icSize, icSize, Gravity.CENTER);
+        avatarWrap.addView(avatarIcon, icLp);
+
+        headerDotView = new View(this);
+        GradientDrawable dotDraw = new GradientDrawable();
+        dotDraw.setShape(GradientDrawable.OVAL);
+        dotDraw.setColor(Color.parseColor("#22C55E"));
+        dotDraw.setStroke((int) Math.max(1, 2 * density), Color.parseColor("#F5F8FC"));
+        headerDotView.setBackground(dotDraw);
+        int dotSize = (int) (11 * density);
+        FrameLayout.LayoutParams dotLp = new FrameLayout.LayoutParams(dotSize, dotSize, Gravity.BOTTOM | Gravity.END);
+        avatarWrap.addView(headerDotView, dotLp);
+
+        headerProfileView.addView(avatarWrap, avLp);
+
+        LinearLayout metaCol = new LinearLayout(this);
+        metaCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView nameTv = new TextView(this);
+        nameTv.setText("Afif");
+        nameTv.setTextColor(Color.parseColor("#111622"));
+        nameTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        nameTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        nameTv.setIncludeFontPadding(false);
+
+        headerStatusView = new TextView(this);
+        headerStatusView.setText("Online");
+        headerStatusView.setTextColor(Color.parseColor("#16A34A"));
+        headerStatusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        headerStatusView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        headerStatusView.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        stLp.topMargin = (int) (1 * density);
+
+        metaCol.addView(nameTv);
+        metaCol.addView(headerStatusView, stLp);
+        headerProfileView.addView(metaCol);
+
+        headerActionsView = new LinearLayout(this);
+        headerActionsView.setOrientation(LinearLayout.HORIZONTAL);
+        headerActionsView.setGravity(Gravity.CENTER_VERTICAL);
+        headerActionsView.setPadding((int) (6 * density), 0, (int) (6 * density), 0);
+        headerActionsView.setBackgroundColor(Color.TRANSPARENT);
+
+        int btnSize = (int) (44 * density);
+        int actIcSize = (int) (19 * density);
+
+        FrameLayout btnVideo = new FrameLayout(this);
+        ImageView vidIc = new ImageView(this);
+        vidIc.setImageDrawable(createHeaderIconDrawable(1));
+        btnVideo.addView(vidIc, new FrameLayout.LayoutParams(actIcSize, actIcSize, Gravity.CENTER));
+        btnVideo.setOnTouchListener((v, ev) -> {
+            int a = ev.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) {
+                videoPressed = true;
+                nativeSetHeaderPress(true, callPressed);
+                v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                v.animate().translationY(1.5f * density).scaleX(0.955f).scaleY(0.955f).setDuration(60).start();
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                videoPressed = false;
+                nativeSetHeaderPress(false, callPressed);
+                v.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(90).start();
+                if (a == MotionEvent.ACTION_UP) {
+                    Toast.makeText(this, "Video Call (Preview)", Toast.LENGTH_SHORT).show();
+                }
+            }
+            return true;
+        });
+
+        FrameLayout btnCall = new FrameLayout(this);
+        ImageView calIc = new ImageView(this);
+        calIc.setImageDrawable(createHeaderIconDrawable(2));
+        btnCall.addView(calIc, new FrameLayout.LayoutParams(actIcSize, actIcSize, Gravity.CENTER));
+        btnCall.setOnTouchListener((v, ev) -> {
+            int a = ev.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) {
+                callPressed = true;
+                nativeSetHeaderPress(videoPressed, true);
+                v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                v.animate().translationY(1.5f * density).scaleX(0.955f).scaleY(0.955f).setDuration(60).start();
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                callPressed = false;
+                nativeSetHeaderPress(videoPressed, false);
+                v.animate().translationY(0f).scaleX(1f).scaleY(1f).setDuration(90).start();
+                if (a == MotionEvent.ACTION_UP) {
+                    Toast.makeText(this, "Voice Call (Preview)", Toast.LENGTH_SHORT).show();
+                }
+            }
+            return true;
+        });
+
+        LinearLayout.LayoutParams vidLp = new LinearLayout.LayoutParams(btnSize, btnSize);
+        vidLp.rightMargin = (int) (8 * density);
+        headerActionsView.addView(btnVideo, vidLp);
+        headerActionsView.addView(btnCall, new LinearLayout.LayoutParams(btnSize, btnSize));
+    }
+
+    private void setProfileState(final boolean online) {
+        isOnline = online;
+        uiHandler.post(() -> {
+            if (headerDotView == null || headerStatusView == null) return;
+            GradientDrawable dotDraw = (GradientDrawable) headerDotView.getBackground();
+            if (isOnline) {
+                if (dotDraw != null) dotDraw.setColor(Color.parseColor("#22C55E"));
+                headerStatusView.setTextColor(Color.parseColor("#16A34A"));
+                headerStatusView.setText("Online");
+            } else {
+                if (dotDraw != null) dotDraw.setColor(Color.parseColor("#94A3B8"));
+                headerStatusView.setTextColor(Color.parseColor("#64748B"));
+                String hhmm = new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date());
+                headerStatusView.setText("Terakhir dilihat pukul " + hhmm);
+            }
+        });
+    }
+
     private void addChatBubble(final String text, final boolean isSelf) {
+        addChatBubble(text, isSelf, System.currentTimeMillis());
+    }
+
+    private void addChatBubble(final String text, final boolean isSelf, final long ts) {
         uiHandler.post(() -> {
             if (chatContainer == null || chatScroll == null) return;
 
@@ -374,22 +618,48 @@ public class MainActivity extends NativeActivity {
             );
             rowLp.bottomMargin = (int) (8 * density);
 
-            TextView bubble = new TextView(this);
-            bubble.setText(text);
-            bubble.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            bubble.setTextColor(isSelf ? Color.WHITE : Color.parseColor("#111622"));
-            bubble.setMaxWidth((int) (270 * density));
-            int px = (int) (15 * density);
-            int py = (int) (10 * density);
-            bubble.setPadding(px, py, px, py);
+            LinearLayout bubble = new LinearLayout(this);
+            bubble.setOrientation(LinearLayout.VERTICAL);
+            int px = (int) (13 * density);
+            int pt = (int) (9 * density);
+            int pb = (int) (7 * density);
+            bubble.setPadding(px, pt, px, pb);
 
-            GradientDrawable bg = new GradientDrawable();
+            TextView msgTv = new TextView(this);
+            msgTv.setText(text);
+            msgTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            msgTv.setTextColor(isSelf ? Color.parseColor("#142C22") : Color.parseColor("#111622"));
+            msgTv.setMaxWidth((int) (270 * density));
+
+            TextView timeTv = new TextView(this);
+            long safeTs = ts > 0 ? ts : System.currentTimeMillis();
+            timeTv.setText(new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date(safeTs)));
+            timeTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+            timeTv.setTextColor(isSelf ? Color.parseColor("#142C22") : Color.parseColor("#111622"));
+            timeTv.setAlpha(0.62f);
+            timeTv.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams timeLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            );
+            timeLp.gravity = Gravity.END;
+            timeLp.topMargin = (int) (3 * density);
+
+            bubble.addView(msgTv);
+            bubble.addView(timeTv, timeLp);
+
+            GradientDrawable bg;
             if (isSelf) {
-                bg.setColor(Color.parseColor("#1970F5"));
+                bg = new GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    new int[]{Color.parseColor("#DFF7EA"), Color.parseColor("#CBEEDC")}
+                );
+                bg.setStroke((int) Math.max(1, density), Color.parseColor("#9ED8BB"));
                 float r = 18 * density;
                 float sm = 5 * density;
                 bg.setCornerRadii(new float[]{r, r, r, r, sm, sm, r, r});
             } else {
+                bg = new GradientDrawable();
                 bg.setColor(Color.parseColor("#F5F8FC"));
                 bg.setStroke((int) Math.max(1, density), Color.parseColor("#D8E0EC"));
                 float r = 18 * density;
@@ -725,7 +995,7 @@ public class MainActivity extends NativeActivity {
                 if (!txt.isEmpty()) {
                     if (MODE_CLOUDFLARE.equals(netMode)) recordUsage(0, 0, 1);
                     saveChatMessage(txt, self, sid, ts);
-                    addChatBubble(txt, self);
+                    addChatBubble(txt, self, ts);
                 }
             } else if ("history".equals(type)) {
                 JSONArray items = obj.optJSONArray("items");
@@ -886,10 +1156,19 @@ public class MainActivity extends NativeActivity {
             if (!text.isEmpty()) {
                 msgInput.setText("");
                 nativeSetTargetCapHeight(52f);
+                String lower = text.toLowerCase(Locale.US);
+                if (lower.matches("^/stateprofile(?:\\s+(online|offline))?$")) {
+                    String[] parts = lower.split("\\s+");
+                    boolean nextOnline = parts.length > 1
+                        ? "online".equals(parts[1])
+                        : !isOnline;
+                    setProfileState(nextOnline);
+                    return;
+                }
                 long nowTs = System.currentTimeMillis();
                 if (MODE_CLOUDFLARE.equals(netMode)) recordUsage(0, 1, 0);
                 saveChatMessage(text, true, deviceId, nowTs);
-                addChatBubble(text, true);
+                addChatBubble(text, true, nowTs);
                 try {
                     JSONObject obj = new JSONObject();
                     obj.put("type", "chat");
@@ -985,7 +1264,7 @@ public class MainActivity extends NativeActivity {
                         for (int i = 0; i < normalized.length(); i++) {
                             JSONObject item = normalized.optJSONObject(i);
                             if (item != null) {
-                                addChatBubble(item.optString("text", ""), item.optBoolean("self", false));
+                                addChatBubble(item.optString("text", ""), item.optBoolean("self", false), item.optLong("ts", 0));
                             }
                         }
                     });
@@ -1029,7 +1308,7 @@ public class MainActivity extends NativeActivity {
                     if (item != null) {
                         String txt = item.optString("text", "");
                         boolean self = item.optBoolean("self", false);
-                        if (!txt.isEmpty()) addChatBubble(txt, self);
+                        if (!txt.isEmpty()) addChatBubble(txt, self, item.optLong("ts", 0));
                     }
                 }
             } catch (Throwable ignored) {
@@ -1072,18 +1351,26 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    private Button makeModalBtn(String label, int bgColor, int textColor) {
+    private Button makeModalBtn(String label, int topColor, int botColor, int strokeColor, int textColor) {
         Button b = new Button(this);
         b.setText(label);
         b.setAllCaps(false);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         b.setTextColor(textColor);
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(bgColor);
+        GradientDrawable d = new GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[]{topColor, botColor}
+        );
+        d.setStroke((int) Math.max(1, density * 0.75f), strokeColor);
         d.setCornerRadius(14 * density);
         b.setBackground(d);
         b.setStateListAnimator(null);
+        b.setElevation(4 * density);
+        if (Build.VERSION.SDK_INT >= 28) {
+            b.setOutlineAmbientShadowColor(Color.BLACK);
+            b.setOutlineSpotShadowColor(Color.BLACK);
+        }
         int py = (int) (9 * density);
         b.setPadding((int) (10 * density), py, (int) (10 * density), py);
         return b;
@@ -1129,8 +1416,10 @@ public class MainActivity extends NativeActivity {
                         final String model = entry.getValue();
                         Button btn = makeModalBtn(
                             "Gabung " + model + " (" + foundIp + ")",
-                            Color.parseColor("#E3EEFF"),
-                            Color.parseColor("#145BD4")
+                            Color.parseColor("#E8EEF6"),
+                            Color.parseColor("#D8E1EE"),
+                            Color.parseColor("#CBD5E1"),
+                            Color.parseColor("#1E293B")
                         );
                         LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1175,7 +1464,13 @@ public class MainActivity extends NativeActivity {
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
 
-                Button btnClear = makeModalBtn("Hapus", Color.argb(26, 200, 30, 30), Color.parseColor("#C81E1E"));
+                Button btnClear = makeModalBtn(
+                    "Hapus",
+                    Color.parseColor("#FEE2E2"),
+                    Color.parseColor("#FECACA"),
+                    Color.parseColor("#FCA5A5"),
+                    Color.parseColor("#B91C1C")
+                );
                 btnClear.setOnClickListener(v -> {
                     clearLocalHistory();
                     try {
@@ -1187,7 +1482,13 @@ public class MainActivity extends NativeActivity {
                     Toast.makeText(this, "Riwayat chat dihapus", Toast.LENGTH_SHORT).show();
                 });
 
-                Button btnJoin = makeModalBtn("Gabung", Color.argb(18, 20, 25, 35), Color.parseColor("#141923"));
+                Button btnJoin = makeModalBtn(
+                    "Gabung",
+                    Color.parseColor("#E8EEF6"),
+                    Color.parseColor("#D8E1EE"),
+                    Color.parseColor("#CBD5E1"),
+                    Color.parseColor("#1E293B")
+                );
                 btnJoin.setOnClickListener(v -> {
                     String ip = sanitizeIp(ipInput.getText().toString());
                     if (!ip.isEmpty()) {
@@ -1204,7 +1505,13 @@ public class MainActivity extends NativeActivity {
                     }
                 });
 
-                Button btnHost = makeModalBtn("Jadi Host", Color.parseColor("#1970F5"), Color.WHITE);
+                Button btnHost = makeModalBtn(
+                    "Jadi Host",
+                    Color.parseColor("#10B981"),
+                    Color.parseColor("#059669"),
+                    Color.parseColor("#047857"),
+                    Color.WHITE
+                );
                 btnHost.setOnClickListener(v -> {
                     netMode = MODE_HOST;
                     getSharedPreferences("cf_usage", Context.MODE_PRIVATE)
@@ -1242,14 +1549,6 @@ public class MainActivity extends NativeActivity {
                     modalCard.animate().scaleX(1.0f).scaleY(1.0f).setDuration(110).start();
                 });
             } catch (Throwable ignored) {
-            }
-        });
-    }
-
-    public void updateFpsLabel(final int fps) {
-        uiHandler.post(() -> {
-            if (fpsLabel != null) {
-                fpsLabel.setText(fps + "fps");
             }
         });
     }
@@ -1333,7 +1632,8 @@ public class MainActivity extends NativeActivity {
         if (overlaysAttached && windowManager != null) {
             try { windowManager.removeViewImmediate(modalRoot); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(chatScroll); } catch (Throwable ignored) {}
-            try { windowManager.removeViewImmediate(fpsLabel); } catch (Throwable ignored) {}
+            try { windowManager.removeViewImmediate(headerProfileView); } catch (Throwable ignored) {}
+            try { windowManager.removeViewImmediate(headerActionsView); } catch (Throwable ignored) {}
             try { windowManager.removeViewImmediate(msgInput); } catch (Throwable ignored) {}
             overlaysAttached = false;
         }
