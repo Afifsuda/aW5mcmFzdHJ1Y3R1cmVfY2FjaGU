@@ -1,4 +1,4 @@
-name: Build Rust Canvas APK
+name: Build Flutter Canvas APK
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build & Release Rust APK
+    name: Build & Release Flutter APK
     runs-on: ubuntu-latest
 
     steps:
@@ -24,26 +24,26 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
-          gradle-version: '9.1.0'
-          cache-read-only: false
+          channel: 'stable'
+          cache: true
 
-      - name: Setup Rust Toolchain (aarch64-linux-android)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Build Rust Native Library (arm64-v8a)
+      - name: Generate Android Platform Files & Permissions
         run: |
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
-          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
-          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
-          cargo build --target aarch64-linux-android --release
-          mkdir -p android/app/src/main/jniLibs/arm64-v8a
-          cp target/aarch64-linux-android/release/libantigravity_canvas.so android/app/src/main/jniLibs/arm64-v8a/
+          rm -rf android
+          flutter create . --platforms=android --org com.afifsuda --project-name canvas
+          python3 - <<'PY'
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p).read()
+          perms = '    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n'
+          if 'android.permission.INTERNET' not in s:
+              s = s.replace('<application', perms + '    <application', 1)
+          if 'usesCleartextTraffic' not in s:
+              s = s.replace('<application', '<application android:usesCleartextTraffic="true"', 1)
+          open(p, 'w').write(s)
+          PY
 
       - name: Decode Keystore & Configure Signing
         env:
@@ -53,17 +53,16 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
-            mkdir -p android/app
             echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
             printf "storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=%s/android/app/release.keystore\n" \
               "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" "${{ github.workspace }}" > android/key.properties
             echo "Release signing configured via GitHub Secrets."
-          else
-            echo "Signing secrets belum lengkap/diatur. Menggunakan konfigurasi signing bawaan proyek."
           fi
 
-      - name: Build Android Release APK
-        run: gradle -p android assembleRelease
+      - name: Build Flutter Release APK (arm64-v8a)
+        run: |
+          flutter pub get
+          flutter build apk --release --target-platform android-arm64
 
       - name: Cleanup Keystore Secrets
         if: always()
@@ -83,11 +82,11 @@ jobs:
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: build/app/outputs/apk/release/app-release.apk
+          files: build/app/outputs/flutter-apk/app-release.apk
           tag_name: ${{ steps.release_info.outputs.tag_name }}
-          name: "Rust Canvas Release ${{ steps.release_info.outputs.tag_name }}"
+          name: "Flutter Canvas Release ${{ steps.release_info.outputs.tag_name }}"
           body: |
-            Release build APK Rust (Kanvas Kosong Bersih).
+            Release build APK Flutter (3D Matte Ceramic Shader + Unified UI).
             Commit: ${{ github.sha }}
           draft: false
           prerelease: false
