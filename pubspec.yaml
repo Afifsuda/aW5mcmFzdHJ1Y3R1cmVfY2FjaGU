@@ -1,5 +1,5 @@
 name: canvas
-description: Antigravity 3D Matte Ceramic Chat UI (Flutter + GLSL FragmentShader)
+description: Antigravity 3D Matte Ceramic Chat UI (Pure Native Flutter)
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -14,5 +14,3 @@ dependencies:
 
 flutter:
   uses-material-design: true
-  shaders:
-    - shaders/matte_ceramic.frag

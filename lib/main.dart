@@ -2,13 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -79,12 +75,9 @@ class ChatHomePage extends StatefulWidget {
   State<ChatHomePage> createState() => _ChatHomePageState();
 }
 
-class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderStateMixin {
+class _ChatHomePageState extends State<ChatHomePage> {
   static const int localPort = 8080;
   static const int discoveryPort = 8081;
-  static const double baseCapHeight = 52.0;
-  static const double maxCapHeight = 148.0;
-  static const double capRadius = 26.0;
 
   static const List<String> wallpapers = [
     'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1080&q=80',
@@ -95,33 +88,12 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
     'https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=1080&q=80',
   ];
 
-  ui.FragmentProgram? _program;
-  ui.Image? _bgImage;
-  ui.Image? _fallbackImage;
-  Color _envColor = const Color(0xFFEDF0F6);
   int _wallIdx = 0;
 
-  late final Ticker _ticker;
-  Duration _lastElapsed = Duration.zero;
-
-  double _currentCapHeight = baseCapHeight;
-  double _targetCapHeight = baseCapHeight;
-  double _imgFade = 0.0;
-
   bool _plusPressed = false;
-  bool _capPressed = false;
   bool _btnPressed = false;
   bool _videoPressed = false;
   bool _callPressed = false;
-
-  double _plusPressVal = 0.0;
-  double _capPressVal = 0.0;
-  double _btnPressVal = 0.0;
-  double _videoPressVal = 0.0;
-  double _callPressVal = 0.0;
-  double _plusPulseVal = 0.0;
-  double _sendPulseVal = 0.0;
-  double _focusVal = 0.0;
 
   bool _isOnline = true;
   String _lastSeenText = 'Online';
@@ -151,23 +123,7 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
   @override
   void initState() {
     super.initState();
-    _initShaderAndFallback();
     _loadPrefsAndStart();
-    _msgFocus.addListener(_wakeTicker);
-    _msgCtrl.addListener(_recalcInputHeight);
-    _ticker = createTicker(_onTick)..start();
-  }
-
-  Future<void> _initShaderAndFallback() async {
-    final recorder = ui.PictureRecorder();
-    final c = Canvas(recorder);
-    c.drawRect(const Rect.fromLTWH(0, 0, 2, 2), Paint()..color = const Color(0xFFEEF1F6));
-    _fallbackImage = await recorder.endRecording().toImage(2, 2);
-
-    final prog = await ui.FragmentProgram.fromAsset('shaders/matte_ceramic.frag');
-    if (!mounted) return;
-    setState(() => _program = prog);
-    _loadWallpaper(_wallIdx);
   }
 
   Future<void> _loadPrefsAndStart() async {
@@ -209,117 +165,6 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
     await prefs.setString('chat_history', jsonEncode(trimmed.map((m) => m.toJson()).toList()));
   }
 
-  Future<void> _loadWallpaper(int idx) async {
-    try {
-      final resp = await http.get(Uri.parse(wallpapers[idx % wallpapers.length])).timeout(const Duration(seconds: 8));
-      if (resp.statusCode != 200) return;
-      final codec = await ui.instantiateImageCodec(resp.bodyBytes, targetWidth: 1080);
-      final frame = await codec.getNextFrame();
-      final img = frame.image;
-
-      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-      Color avg = _envColor;
-      if (bd != null && bd.lengthInBytes >= 4) {
-        final bytes = bd.buffer.asUint8List();
-        final step = math.max(1, bytes.length ~/ 4 ~/ 24);
-        int r = 0, g = 0, b = 0, cnt = 0;
-        for (int i = 0; i + 3 < bytes.length; i += step * 4) {
-          r += bytes[i];
-          g += bytes[i + 1];
-          b += bytes[i + 2];
-          cnt++;
-        }
-        if (cnt > 0) {
-          avg = Color.fromARGB(255, r ~/ cnt, g ~/ cnt, b ~/ cnt);
-        }
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _bgImage = img;
-        _envColor = avg;
-        _imgFade = 0.05;
-      });
-      _wakeTicker();
-    } catch (_) {}
-  }
-
-  void _wakeTicker() {
-    if (!_ticker.isActive) {
-      _lastElapsed = Duration.zero;
-      _ticker.start();
-    }
-  }
-
-  void _onTick(Duration elapsed) {
-    final dt = _lastElapsed == Duration.zero
-        ? 0.016
-        : ((elapsed - _lastElapsed).inMicroseconds / 1000000.0).clamp(0.001, 0.05);
-    _lastElapsed = elapsed;
-
-    final rate = (dt * 18.0).clamp(0.0, 1.0);
-    _currentCapHeight += (_targetCapHeight - _currentCapHeight) * rate;
-    if ((_targetCapHeight - _currentCapHeight).abs() < 0.15) {
-      _currentCapHeight = _targetCapHeight;
-    }
-
-    if (_imgFade > 0.0 && _imgFade < 1.0) {
-      _imgFade = (_imgFade + dt * 3.0).clamp(0.0, 1.0);
-    }
-
-    _plusPressVal += ((_plusPressed ? 1.0 : 0.0) - _plusPressVal) * rate;
-    _capPressVal += ((_capPressed ? 1.0 : 0.0) - _capPressVal) * rate;
-    _btnPressVal += ((_btnPressed ? 1.0 : 0.0) - _btnPressVal) * rate;
-    _videoPressVal += ((_videoPressed ? 1.0 : 0.0) - _videoPressVal) * rate;
-    _callPressVal += ((_callPressed ? 1.0 : 0.0) - _callPressVal) * rate;
-    _focusVal += ((_msgFocus.hasFocus ? 1.0 : 0.0) - _focusVal) * (dt * 12.0).clamp(0.0, 1.0);
-
-    final decay = math.pow(0.86, dt * 60.0).toDouble();
-    _plusPulseVal *= decay;
-    _sendPulseVal *= decay;
-    if (_plusPulseVal < 0.003) _plusPulseVal = 0.0;
-    if (_sendPulseVal < 0.003) _sendPulseVal = 0.0;
-
-    final active = (_targetCapHeight - _currentCapHeight).abs() > 0.1 ||
-        (_imgFade > 0.0 && _imgFade < 1.0) ||
-        (_plusPressVal - (_plusPressed ? 1.0 : 0.0)).abs() > 0.003 ||
-        (_capPressVal - (_capPressed ? 1.0 : 0.0)).abs() > 0.003 ||
-        (_btnPressVal - (_btnPressed ? 1.0 : 0.0)).abs() > 0.003 ||
-        (_videoPressVal - (_videoPressed ? 1.0 : 0.0)).abs() > 0.003 ||
-        (_callPressVal - (_callPressed ? 1.0 : 0.0)).abs() > 0.003 ||
-        (_focusVal - (_msgFocus.hasFocus ? 1.0 : 0.0)).abs() > 0.003 ||
-        _plusPulseVal > 0.003 ||
-        _sendPulseVal > 0.003;
-
-    if (mounted) setState(() {});
-    if (!active) {
-      _ticker.stop();
-      _lastElapsed = Duration.zero;
-    }
-  }
-
-  void _recalcInputHeight() {
-    if (!mounted) return;
-    final sw = MediaQuery.of(context).size.width;
-    final totalW = math.min(sw - 28.0, 540.0);
-    final inputW = math.max(60.0, totalW - 116.0);
-
-    final tp = TextPainter(
-      text: TextSpan(
-        text: _msgCtrl.text.isEmpty ? ' ' : _msgCtrl.text,
-        style: const TextStyle(fontSize: 17, height: 22 / 17, fontWeight: FontWeight.w400),
-      ),
-      textDirection: TextDirection.ltr,
-      maxLines: 6,
-    )..layout(maxWidth: inputW);
-
-    final nextH = (tp.height + 30.0).clamp(baseCapHeight, maxCapHeight);
-    if ((nextH - _targetCapHeight).abs() > 0.5) {
-      _targetCapHeight = nextH;
-      _wakeTicker();
-    }
-  }
-
   void _setProfileState(bool online) {
     setState(() {
       _isOnline = online;
@@ -348,40 +193,33 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
 
   void _triggerSend() {
     final text = _msgCtrl.text.trim();
-    _sendPulseVal = 1.0;
     HapticFeedback.lightImpact();
-    if (text.isNotEmpty) {
-      _msgCtrl.clear();
-      _targetCapHeight = baseCapHeight;
+    if (text.isEmpty) return;
 
-      final cmd = RegExp(r'^/stateprofile(?:\s+(online|offline))?$', caseSensitive: false).firstMatch(text);
-      if (cmd != null) {
-        final arg = cmd.group(1)?.toLowerCase();
-        _setProfileState(arg == 'online' ? true : arg == 'offline' ? false : !_isOnline);
-        _wakeTicker();
-        return;
-      }
-
-      final msg = ChatMessage(
-        text: text,
-        isSelf: true,
-        senderId: _deviceId,
-        ts: DateTime.now().millisecondsSinceEpoch,
-      );
-      setState(() => _messages.add(msg));
-      _saveHistory();
-      _scrollToBottom();
-      _broadcastJson({'type': 'chat', ...msg.toJson()});
+    _msgCtrl.clear();
+    final cmd = RegExp(r'^/stateprofile(?:\s+(online|offline))?$', caseSensitive: false).firstMatch(text);
+    if (cmd != null) {
+      final arg = cmd.group(1)?.toLowerCase();
+      _setProfileState(arg == 'online' ? true : arg == 'offline' ? false : !_isOnline);
+      return;
     }
-    _wakeTicker();
+
+    final msg = ChatMessage(
+      text: text,
+      isSelf: true,
+      senderId: _deviceId,
+      ts: DateTime.now().millisecondsSinceEpoch,
+    );
+    setState(() => _messages.add(msg));
+    _saveHistory();
+    _scrollToBottom();
+    _broadcastJson({'type': 'chat', ...msg.toJson()});
   }
 
   void _triggerPlus() {
-    _plusPulseVal = 1.0;
     HapticFeedback.mediumImpact();
     _ipCtrl.text = _hostIp;
     setState(() => _modalOpen = true);
-    _wakeTicker();
   }
 
   Future<String> _getLocalIpv4() async {
@@ -577,7 +415,6 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
 
   @override
   void dispose() {
-    _ticker.dispose();
     _udpBeaconTimer?.cancel();
     _udpSocket?.close();
     _stopNetwork();
@@ -593,76 +430,78 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
     return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
+  BoxDecoration _matteSurface({
+    double radius = 28,
+    bool isCircle = false,
+    bool isAccent = false,
+    bool pressed = false,
+  }) {
+    return BoxDecoration(
+      shape: isCircle ? BoxShape.circle : BoxShape.rectangle,
+      borderRadius: isCircle ? null : BorderRadius.circular(radius),
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: isAccent
+            ? (pressed
+                ? const [Color(0xFF2372EA), Color(0xFF104EB8)]
+                : const [Color(0xFF2E84FF), Color(0xFF145FD9)])
+            : (pressed
+                ? const [Color(0xFFEBF0F7), Color(0xFFD5DFEC)]
+                : const [Color(0xFFFCFDFF), Color(0xFFE3EAF4)]),
+      ),
+      border: Border.all(
+        color: isAccent ? const Color(0x669AC5FF) : Colors.white.withOpacity(0.88),
+        width: 1,
+      ),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(pressed ? 0.14 : (isCircle ? 0.20 : 0.15)),
+          blurRadius: pressed ? 4 : (isCircle ? 8 : 14),
+          offset: Offset(0, pressed ? 1 : (isCircle ? 3 : 5)),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
     final sw = mq.size.width;
-    final sh = mq.size.height;
     final topInset = mq.padding.top;
     final kbBottom = mq.viewInsets.bottom;
 
     final totalHeaderW = math.min(sw - 28.0, 540.0);
-    final startHeaderX = (sw - totalHeaderW) * 0.5;
     const actionW = 108.0;
     const gapW = 10.0;
     final profileW = totalHeaderW - actionW - gapW;
     final headerTop = topInset + 10.0;
-    final headerCy = headerTop + 28.0;
 
     final totalBarW = math.min(sw - 28.0, 540.0);
-    final startBarX = (sw - totalBarW) * 0.5;
-    final bottomY = sh - kbBottom - 10.0;
-    final capCy = bottomY - _currentCapHeight * 0.5;
-    final btnCy = bottomY - 6.0 - 20.0;
-    final plusCx = startBarX + 6.0 + 20.0;
-    final sendCx = startBarX + totalBarW - 6.0 - 20.0;
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
       backgroundColor: const Color(0xFFEEF1F6),
       body: Stack(
         children: [
-          // 1. UNIFIED 3D MATTE CERAMIC SHADER LAYER
+          // 1. NATIVE FLUTTER WALLPAPER BACKGROUND
           Positioned.fill(
             child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
               onTap: () {
                 _msgFocus.unfocus();
-                _wallIdx = (_wallIdx + 1) % wallpapers.length;
-                _loadWallpaper(_wallIdx);
+                setState(() => _wallIdx = (_wallIdx + 1) % wallpapers.length);
               },
-              child: _program == null
-                  ? const SizedBox.expand()
-                  : CustomPaint(
-                      painter: _MatteCeramicPainter(
-                        program: _program!,
-                        bgImage: _bgImage ?? _fallbackImage,
-                        imgFade: _imgFade,
-                        envColor: _envColor,
-                        headerCenter: Offset(startHeaderX + profileW * 0.5, headerCy),
-                        headerHalf: Offset(profileW * 0.5, 28.0),
-                        actionCenter: Offset(startHeaderX + totalHeaderW - actionW * 0.5, headerCy),
-                        actionHalf: const Offset(actionW * 0.5, 28.0),
-                        videoCenter: Offset(startHeaderX + totalHeaderW - 6.0 - 22.0 - 8.0 - 44.0, headerCy),
-                        callCenter: Offset(startHeaderX + totalHeaderW - 6.0 - 22.0, headerCy),
-                        headerBtnR: 22.0,
-                        videoPress: _videoPressVal,
-                        callPress: _callPressVal,
-                        capCenter: Offset(sw * 0.5, capCy),
-                        capHalf: Offset(totalBarW * 0.5, _currentCapHeight * 0.5),
-                        capRadius: capRadius,
-                        plusCenter: Offset(plusCx, btnCy),
-                        plusRadius: 20.0,
-                        btnCenter: Offset(sendCx, btnCy),
-                        btnRadius: 20.0,
-                        plusPress: _plusPressVal,
-                        plusPulse: _plusPulseVal,
-                        capPress: _capPressVal,
-                        btnPress: _btnPressVal,
-                        isFocused: _focusVal,
-                        sendPulse: _sendPulseVal,
-                      ),
-                    ),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 280),
+                child: Image.network(
+                  wallpapers[_wallIdx],
+                  key: ValueKey(_wallIdx),
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: double.infinity,
+                  errorBuilder: (_, __, ___) => Container(color: const Color(0xFFEEF1F6)),
+                ),
+              ),
             ),
           ),
 
@@ -672,8 +511,8 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
               shaderCallback: (rect) {
                 final topStop = ((headerTop + 56.0) / rect.height).clamp(0.0, 0.35);
                 final topFadeEnd = ((headerTop + 78.0) / rect.height).clamp(0.0, 0.40);
-                final botFadeStart = ((bottomY - _currentCapHeight - 24.0) / rect.height).clamp(0.5, 1.0);
-                final botStop = ((bottomY - _currentCapHeight - 2.0) / rect.height).clamp(0.55, 1.0);
+                final botFadeStart = ((rect.height - kbBottom - 84.0) / rect.height).clamp(0.5, 1.0);
+                final botStop = ((rect.height - kbBottom - 58.0) / rect.height).clamp(0.55, 1.0);
                 return LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
@@ -695,7 +534,7 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
                   14,
                   headerTop + 68.0,
                   14,
-                  kbBottom + _currentCapHeight + 24.0,
+                  kbBottom + 84.0,
                 ),
                 itemCount: _messages.length,
                 itemBuilder: (context, i) {
@@ -766,79 +605,123 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
             ),
           ),
 
-          // 3. HEADER PROFILE CAPSULE (LEFT)
+          // 3. FLOATING HEADER: PROFILE CAPSULE + SEPARATE ACTIONS CAPSULE
           Positioned(
-            left: startHeaderX,
             top: headerTop,
-            width: profileW,
-            height: 56,
-            child: IgnorePointer(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+            left: 0,
+            right: 0,
+            child: Center(
+              child: SizedBox(
+                width: totalHeaderW,
+                height: 56,
                 child: Row(
                   children: [
-                    SizedBox(
-                      width: 36,
-                      height: 36,
-                      child: Stack(
+                    Container(
+                      width: profileW,
+                      height: 56,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: _matteSurface(radius: 28),
+                      child: Row(
                         children: [
-                          Container(
-                            decoration: const BoxDecoration(
-                              shape: BoxShape.circle,
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [Color(0xFF3B82F6), Color(0xFF1D4ED8)],
-                              ),
-                            ),
-                            child: const Center(
-                              child: Icon(Icons.person, color: Colors.white, size: 20),
+                          SizedBox(
+                            width: 36,
+                            height: 36,
+                            child: Stack(
+                              children: [
+                                Container(
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                      colors: [Color(0xFF3B82F6), Color(0xFF1D4ED8)],
+                                    ),
+                                  ),
+                                  child: const Center(
+                                    child: Icon(Icons.person, color: Colors.white, size: 20),
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 0,
+                                  bottom: 0,
+                                  child: Container(
+                                    width: 11,
+                                    height: 11,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: _isOnline ? const Color(0xFF22C55E) : const Color(0xFF94A3B8),
+                                      border: Border.all(color: const Color(0xFFF5F8FC), width: 2),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          Positioned(
-                            right: 0,
-                            bottom: 0,
-                            child: Container(
-                              width: 11,
-                              height: 11,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: _isOnline ? const Color(0xFF22C55E) : const Color(0xFF94A3B8),
-                                border: Border.all(color: const Color(0xFFF5F8FC), width: 2),
-                              ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Afif',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF111622),
+                                    height: 1.15,
+                                  ),
+                                ),
+                                const SizedBox(height: 1),
+                                Text(
+                                  _lastSeenText,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                    color: _isOnline ? const Color(0xFF16A34A) : const Color(0xFF64748B),
+                                    height: 1.25,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 11),
-                    Expanded(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                    const SizedBox(width: gapW),
+                    Container(
+                      width: actionW,
+                      height: 56,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      decoration: _matteSurface(radius: 28),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text(
-                            'Afif',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF111622),
-                              height: 1.15,
-                            ),
+                          _buildCircleActionBtn(
+                            icon: Icons.videocam_rounded,
+                            pressed: _videoPressed,
+                            onChanged: (v) => setState(() => _videoPressed = v),
+                            onTap: () {
+                              HapticFeedback.lightImpact();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Video Call (Preview)'), duration: Duration(seconds: 1)),
+                              );
+                            },
                           ),
-                          const SizedBox(height: 1),
-                          Text(
-                            _lastSeenText,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: _isOnline ? const Color(0xFF16A34A) : const Color(0xFF64748B),
-                              height: 1.25,
-                            ),
+                          _buildCircleActionBtn(
+                            icon: Icons.call_rounded,
+                            pressed: _callPressed,
+                            onChanged: (v) => setState(() => _callPressed = v),
+                            onTap: () {
+                              HapticFeedback.lightImpact();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Voice Call (Preview)'), duration: Duration(seconds: 1)),
+                              );
+                            },
                           ),
                         ],
                       ),
@@ -849,141 +732,73 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
             ),
           ),
 
-          // 4. HEADER ACTIONS CAPSULE (RIGHT: VIDEO CALL & CALL)
+          // 4. FLOATING BOTTOM INPUT CAPSULE (+, TEXTFIELD, SEND)
           Positioned(
-            left: startHeaderX + totalHeaderW - actionW,
-            top: headerTop,
-            width: actionW,
-            height: 56,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildHeaderCircleHit(
-                    icon: Icons.videocam_rounded,
-                    pressVal: _videoPressVal,
-                    onDown: () {
-                      _videoPressed = true;
-                      HapticFeedback.lightImpact();
-                      _wakeTicker();
-                    },
-                    onUp: () {
-                      _videoPressed = false;
-                      _wakeTicker();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Video Call (Preview)'), duration: Duration(seconds: 1)),
-                      );
-                    },
-                  ),
-                  _buildHeaderCircleHit(
-                    icon: Icons.call_rounded,
-                    pressVal: _callPressVal,
-                    onDown: () {
-                      _callPressed = true;
-                      HapticFeedback.lightImpact();
-                      _wakeTicker();
-                    },
-                    onUp: () {
-                      _callPressed = false;
-                      _wakeTicker();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Voice Call (Preview)'), duration: Duration(seconds: 1)),
-                      );
-                    },
-                  ),
-                ],
+            bottom: kbBottom + 10.0,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                width: totalBarW,
+                constraints: const BoxConstraints(minHeight: 52, maxHeight: 148),
+                padding: const EdgeInsets.all(6),
+                decoration: _matteSurface(radius: 26),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    _buildCircleActionBtn(
+                      icon: Icons.add_rounded,
+                      size: 40,
+                      iconSize: 22,
+                      pressed: _plusPressed,
+                      onChanged: (v) => setState(() => _plusPressed = v),
+                      onTap: _triggerPlus,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _msgCtrl,
+                        focusNode: _msgFocus,
+                        maxLines: 6,
+                        minLines: 1,
+                        textInputAction: TextInputAction.newline,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          height: 22 / 17,
+                          color: Color(0xFF111622),
+                        ),
+                        decoration: const InputDecoration(
+                          hintText: 'Tulis pesan...',
+                          hintStyle: TextStyle(color: Color(0xFF768296), fontSize: 17),
+                          border: InputBorder.none,
+                          isCollapsed: true,
+                          contentPadding: EdgeInsets.symmetric(vertical: 9),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _buildCircleActionBtn(
+                      icon: Icons.arrow_upward_rounded,
+                      size: 40,
+                      iconSize: 21,
+                      isAccent: true,
+                      pressed: _btnPressed,
+                      onChanged: (v) => setState(() => _btnPressed = v),
+                      onTap: _triggerSend,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
 
-          // 5. BOTTOM INPUT BAR OVERLAY (+, TEXTFIELD, SEND)
-          Positioned(
-            left: startBarX,
-            top: bottomY - _currentCapHeight + _capPressVal * 1.4,
-            width: totalBarW,
-            height: _currentCapHeight,
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (_) {
-                    _plusPressed = true;
-                    _wakeTicker();
-                  },
-                  onTapUp: (_) {
-                    _plusPressed = false;
-                    _triggerPlus();
-                  },
-                  onTapCancel: () {
-                    _plusPressed = false;
-                    _wakeTicker();
-                  },
-                  child: const SizedBox(width: 52, height: 52),
-                ),
-                Expanded(
-                  child: Listener(
-                    onPointerDown: (_) {
-                      _capPressed = true;
-                      _wakeTicker();
-                    },
-                    onPointerUp: (_) {
-                      _capPressed = false;
-                      _wakeTicker();
-                    },
-                    onPointerCancel: (_) {
-                      _capPressed = false;
-                      _wakeTicker();
-                    },
-                    child: TextField(
-                      controller: _msgCtrl,
-                      focusNode: _msgFocus,
-                      maxLines: 6,
-                      minLines: 1,
-                      textInputAction: TextInputAction.newline,
-                      style: const TextStyle(
-                        fontSize: 17,
-                        height: 22 / 17,
-                        color: Color(0xFF111622),
-                      ),
-                      decoration: const InputDecoration(
-                        hintText: 'Tulis pesan...',
-                        hintStyle: TextStyle(color: Color(0xFF768296), fontSize: 17),
-                        border: InputBorder.none,
-                        isCollapsed: true,
-                        contentPadding: EdgeInsets.symmetric(vertical: 15),
-                      ),
-                    ),
-                  ),
-                ),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (_) {
-                    _btnPressed = true;
-                    _wakeTicker();
-                  },
-                  onTapUp: (_) {
-                    _btnPressed = false;
-                    _triggerSend();
-                  },
-                  onTapCancel: () {
-                    _btnPressed = false;
-                    _wakeTicker();
-                  },
-                  child: const SizedBox(width: 52, height: 52),
-                ),
-              ],
-            ),
-          ),
-
-          // 6. POPUP + MODAL (3D MATTE CERAMIC CARD)
+          // 5. POPUP + MODAL
           if (_modalOpen)
             Positioned.fill(
               child: GestureDetector(
                 onTap: () => setState(() => _modalOpen = false),
                 child: Container(
-                  color: Colors.black.withOpacity(0.08),
+                  color: Colors.black.withOpacity(0.10),
                   alignment: Alignment.center,
                   padding: const EdgeInsets.all(20),
                   child: GestureDetector(
@@ -992,22 +807,7 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
                       width: double.infinity,
                       constraints: const BoxConstraints(maxWidth: 360),
                       padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [Color(0xFFFCFDFF), Color(0xFFE7EDF6)],
-                        ),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: Colors.white.withOpacity(0.85)),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.18),
-                            blurRadius: 24,
-                            offset: const Offset(0, 10),
-                          ),
-                        ],
-                      ),
+                      decoration: _matteSurface(radius: 24),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1141,26 +941,34 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildHeaderCircleHit({
+  Widget _buildCircleActionBtn({
     required IconData icon,
-    required double pressVal,
-    required VoidCallback onDown,
-    required VoidCallback onUp,
+    required bool pressed,
+    required ValueChanged<bool> onChanged,
+    required VoidCallback onTap,
+    double size = 44,
+    double iconSize = 19,
+    bool isAccent = false,
   }) {
     return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => onDown(),
-      onTapUp: (_) => onUp(),
-      onTapCancel: onUp,
-      child: Transform.translate(
-        offset: Offset(0, pressVal * 1.5),
-        child: Transform.scale(
-          scale: 1.0 - pressVal * 0.045,
-          child: SizedBox(
-            width: 44,
-            height: 44,
-            child: Center(
-              child: Icon(icon, size: 19, color: const Color(0xFF111622)),
+      onTapDown: (_) => onChanged(true),
+      onTapUp: (_) {
+        onChanged(false);
+        onTap();
+      },
+      onTapCancel: () => onChanged(false),
+      child: AnimatedScale(
+        scale: pressed ? 0.94 : 1.0,
+        duration: const Duration(milliseconds: 90),
+        child: Container(
+          width: size,
+          height: size,
+          decoration: _matteSurface(isCircle: true, isAccent: isAccent, pressed: pressed),
+          child: Center(
+            child: Icon(
+              icon,
+              size: iconSize,
+              color: isAccent ? Colors.white : const Color(0xFF111622),
             ),
           ),
         ),
@@ -1215,117 +1023,4 @@ class _ChatHomePageState extends State<ChatHomePage> with SingleTickerProviderSt
       ),
     );
   }
-}
-
-class _MatteCeramicPainter extends CustomPainter {
-  final ui.FragmentProgram program;
-  final ui.Image? bgImage;
-  final double imgFade;
-  final Color envColor;
-  final Offset headerCenter;
-  final Offset headerHalf;
-  final Offset actionCenter;
-  final Offset actionHalf;
-  final Offset videoCenter;
-  final Offset callCenter;
-  final double headerBtnR;
-  final double videoPress;
-  final double callPress;
-  final Offset capCenter;
-  final Offset capHalf;
-  final double capRadius;
-  final Offset plusCenter;
-  final double plusRadius;
-  final Offset btnCenter;
-  final double btnRadius;
-  final double plusPress;
-  final double plusPulse;
-  final double capPress;
-  final double btnPress;
-  final double isFocused;
-  final double sendPulse;
-
-  _MatteCeramicPainter({
-    required this.program,
-    required this.bgImage,
-    required this.imgFade,
-    required this.envColor,
-    required this.headerCenter,
-    required this.headerHalf,
-    required this.actionCenter,
-    required this.actionHalf,
-    required this.videoCenter,
-    required this.callCenter,
-    required this.headerBtnR,
-    required this.videoPress,
-    required this.callPress,
-    required this.capCenter,
-    required this.capHalf,
-    required this.capRadius,
-    required this.plusCenter,
-    required this.plusRadius,
-    required this.btnCenter,
-    required this.btnRadius,
-    required this.plusPress,
-    required this.plusPulse,
-    required this.capPress,
-    required this.btnPress,
-    required this.isFocused,
-    required this.sendPulse,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final shader = program.fragmentShader();
-    int i = 0;
-    shader.setFloat(i++, size.width);
-    shader.setFloat(i++, size.height);
-    shader.setFloat(i++, (bgImage?.width ?? 1).toDouble());
-    shader.setFloat(i++, (bgImage?.height ?? 1).toDouble());
-    shader.setFloat(i++, imgFade);
-    shader.setFloat(i++, plusCenter.dx);
-    shader.setFloat(i++, plusCenter.dy);
-    shader.setFloat(i++, plusRadius);
-    shader.setFloat(i++, capCenter.dx);
-    shader.setFloat(i++, capCenter.dy);
-    shader.setFloat(i++, capHalf.dx);
-    shader.setFloat(i++, capHalf.dy);
-    shader.setFloat(i++, capRadius);
-    shader.setFloat(i++, btnCenter.dx);
-    shader.setFloat(i++, btnCenter.dy);
-    shader.setFloat(i++, btnRadius);
-    shader.setFloat(i++, plusPress);
-    shader.setFloat(i++, plusPulse);
-    shader.setFloat(i++, capPress);
-    shader.setFloat(i++, btnPress);
-    shader.setFloat(i++, isFocused);
-    shader.setFloat(i++, sendPulse);
-    shader.setFloat(i++, headerCenter.dx);
-    shader.setFloat(i++, headerCenter.dy);
-    shader.setFloat(i++, headerHalf.dx);
-    shader.setFloat(i++, headerHalf.dy);
-    shader.setFloat(i++, actionCenter.dx);
-    shader.setFloat(i++, actionCenter.dy);
-    shader.setFloat(i++, actionHalf.dx);
-    shader.setFloat(i++, actionHalf.dy);
-    shader.setFloat(i++, videoCenter.dx);
-    shader.setFloat(i++, videoCenter.dy);
-    shader.setFloat(i++, callCenter.dx);
-    shader.setFloat(i++, callCenter.dy);
-    shader.setFloat(i++, headerBtnR);
-    shader.setFloat(i++, videoPress);
-    shader.setFloat(i++, callPress);
-    shader.setFloat(i++, envColor.r);
-    shader.setFloat(i++, envColor.g);
-    shader.setFloat(i++, envColor.b);
-
-    if (bgImage != null) {
-      shader.setImageSampler(0, bgImage!);
-    }
-
-    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
-  }
-
-  @override
-  bool shouldRepaint(covariant _MatteCeramicPainter oldDelegate) => true;
 }
