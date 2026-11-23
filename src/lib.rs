@@ -32,6 +32,7 @@ static MODAL_HW_PX: AtomicU32 = AtomicU32::new(0);
 static MODAL_HH_PX: AtomicU32 = AtomicU32::new(0);
 static VIDEO_PRESSED: AtomicBool = AtomicBool::new(false);
 static CALL_PRESSED: AtomicBool = AtomicBool::new(false);
+static TOP_INSET_PX: AtomicI32 = AtomicI32::new(0);
 
 #[no_mangle]
 pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeOnWallpaperLoaded(
@@ -121,6 +122,15 @@ pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetHeaderPres
 ) {
     VIDEO_PRESSED.store(video_pressed != 0, Ordering::Relaxed);
     CALL_PRESSED.store(call_pressed != 0, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_afifsuda_canvas_MainActivity_nativeSetTopInset(
+    _env: JNIEnv,
+    _class: JClass,
+    inset_px: jint,
+) {
+    TOP_INSET_PX.store(inset_px, Ordering::Relaxed);
 }
 
 // --- Minimal EGL & GLESv3 FFI ---
@@ -939,12 +949,13 @@ impl GlState {
         let video_cx = start_header_x + total_header_w - 6.0 - 22.0 - 8.0 - 44.0;
         let call_cx = start_header_x + total_header_w - 6.0 - 22.0;
 
-        glUniform2f(self.u.header_center, profile_cx * dpr, 40.0 * dpr);
+        let header_y = (TOP_INSET_PX.load(Ordering::Relaxed).max(0) as f32 / dpr) + 10.0 + 28.0;
+        glUniform2f(self.u.header_center, profile_cx * dpr, header_y * dpr);
         glUniform2f(self.u.header_half, (profile_w * 0.5) * dpr, 28.0 * dpr);
-        glUniform2f(self.u.action_center, action_cx * dpr, 40.0 * dpr);
+        glUniform2f(self.u.action_center, action_cx * dpr, header_y * dpr);
         glUniform2f(self.u.action_half, (action_w * 0.5) * dpr, 28.0 * dpr);
-        glUniform2f(self.u.video_center, video_cx * dpr, 40.0 * dpr);
-        glUniform2f(self.u.call_center, call_cx * dpr, 40.0 * dpr);
+        glUniform2f(self.u.video_center, video_cx * dpr, header_y * dpr);
+        glUniform2f(self.u.call_center, call_cx * dpr, header_y * dpr);
         glUniform1f(self.u.header_btn_r, 22.0 * dpr);
         glUniform1f(self.u.video_press, video_press);
         glUniform1f(self.u.call_press, call_press);
@@ -1096,6 +1107,7 @@ fn android_main(app: AndroidApp) {
 
     let mut last_tick = Instant::now();
     let mut needs_redraw = true;
+    let mut last_top_inset: i32 = -1;
     let mut last_sync: (i32, i32, i32, i32, i32) = (-1, -1, -1, -1, -1);
 
     while running {
@@ -1343,6 +1355,12 @@ fn android_main(app: AndroidApp) {
             f32::from_bits(MODAL_HW_PX.load(Ordering::Relaxed)),
             f32::from_bits(MODAL_HH_PX.load(Ordering::Relaxed)),
         ];
+
+        let cur_top_inset = TOP_INSET_PX.load(Ordering::Relaxed);
+        if cur_top_inset != last_top_inset {
+            last_top_inset = cur_top_inset;
+            needs_redraw = true;
+        }
 
         if has_window && (needs_redraw || still_animating) {
             if let Some(ref state) = gl {

@@ -96,6 +96,7 @@ public class MainActivity extends NativeActivity {
     private static native void nativeSetModalOpen(boolean open);
     private static native void nativeSetModalBounds(float cx, float cy, float hw, float hh);
     private static native void nativeSetHeaderPress(boolean videoPressed, boolean callPressed);
+    private static native void nativeSetTopInset(int insetPx);
 
     private static final String RELAY_HOST = "aw5mcmfzdhj1y3R1cmvfy2fjagu.sudaapip.workers.dev";
     private static final String RELAY_PATH = "/?room=1234";
@@ -292,7 +293,9 @@ public class MainActivity extends NativeActivity {
         int gapW = Math.round(10 * density);
         int profileW = Math.max(100, totalHeaderW - actionW - gapW);
         int headerH = Math.round(56 * density);
-        int headerY = Math.round(12 * density);
+        int topInsetPx = getStatusBarHeightPx();
+        nativeSetTopInset(topInsetPx);
+        int headerY = topInsetPx + Math.round(10 * density);
 
         headerProfileLp = new WindowManager.LayoutParams(
             profileW,
@@ -392,6 +395,11 @@ public class MainActivity extends NativeActivity {
             t.printStackTrace(new PrintWriter(sw));
             showErrorAndCopy("Overlay attach error:\n" + sw.toString());
         }
+    }
+
+    private int getStatusBarHeightPx() {
+        int resId = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return resId > 0 ? getResources().getDimensionPixelSize(resId) : Math.round(28 * density);
     }
 
     private Drawable createHeaderIconDrawable(final int kind) {
@@ -1102,7 +1110,7 @@ public class MainActivity extends NativeActivity {
             }
 
             if (chatScroll != null && chatLp != null && targetY > 0) {
-                int chatTop = (int) (70 * density);
+                int chatTop = getStatusBarHeightPx() + (int) (74 * density);
                 int chatH = Math.max((int) (40 * density), targetY - chatTop - (int) (10 * density));
                 if (Math.abs(chatH - lastChatHeight) > 2) {
                     lastChatHeight = chatH;
@@ -1539,11 +1547,13 @@ public class MainActivity extends NativeActivity {
                 modalCard.setScaleY(0.94f);
                 modalRoot.setVisibility(View.VISIBLE);
                 modalCard.post(() -> {
-                    int[] loc = new int[2];
-                    modalCard.getLocationOnScreen(loc);
+                    int[] rootLoc = new int[2];
+                    modalRoot.getLocationOnScreen(rootLoc);
                     float hw = modalCard.getWidth() * 0.5f;
                     float hh = modalCard.getHeight() * 0.5f;
-                    nativeSetModalBounds(loc[0] + hw, loc[1] + hh, hw, hh);
+                    float cx = rootLoc[0] + modalCard.getLeft() + hw;
+                    float cy = rootLoc[1] + modalCard.getTop() + hh;
+                    nativeSetModalBounds(cx, cy, hw, hh);
                     nativeSetModalOpen(true);
                     modalRoot.animate().alpha(1.0f).setDuration(100).start();
                     modalCard.animate().scaleX(1.0f).scaleY(1.0f).setDuration(110).start();
